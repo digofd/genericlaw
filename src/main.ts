@@ -150,6 +150,8 @@ async function main(): Promise<void> {
     controller,
     config,
     voiceEnabled: ffmpegAvailable && whisperAvailable,
+    // thunk: shutdown() e declarada abaixo e so precisa existir na hora da chamada
+    onShutdown: () => shutdown(),
   });
 
   let isShuttingDown = false;

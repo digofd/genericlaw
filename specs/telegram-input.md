@@ -162,6 +162,19 @@ comando primeiro impede que `/novo` seja tratado como texto comum e enviado ao L
 valida `ctx.from.id` contra `allowedUserIds`, extrai conteudo, monta `ProcessedInput` e chama
 `controller.handle(processedInput)`.
 
+**Contrato de `/parar` (alias `/stop`):** valida o whitelist e dispara a mesma sequencia de
+encerramento dos sinais SIGINT/SIGTERM, via o callback `onShutdown` recebido do bootstrap.
+
+O encerramento e **agendado para depois** do handler retornar (`setTimeout`), nao aguardado dentro
+dele: `shutdown()` chama `bot.stop()`, que espera os handlers em andamento terminarem. Chamar de
+dentro do proprio handler travaria.
+
+Este comando existe porque o bot roda como processo de segundo plano sem terminal interativo. No
+Windows nao ha forma confiavel de entregar SIGINT a um processo Node sem console - `taskkill` sem
+`/F` recusa, e tanto o PowerShell quanto o MSYS2 caem em `TerminateProcess`, que ignora handlers.
+Sem `/parar`, todo encerramento vira kill forcado: a gravacao final do banco nao roda e arquivos
+temporarios de TTS vazam em `tmp/`.
+
 **Contrato de `/novo`:** valida o whitelist, chama `controller.resetConversation(conversationId)` e
 responde com a contagem de mensagens apagadas. Apaga **somente** o historico: a linha da conversa
 permanece (remove-la quebraria a foreign key da proxima mensagem) e os arquivos ja criados no

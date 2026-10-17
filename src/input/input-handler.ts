@@ -39,6 +39,7 @@ export class TelegramInputHandler {
   private controller: AgentController;
   private ffmpegBinary: string;
   private voiceEnabled: boolean;
+  private onShutdown?: () => Promise<void>;
   private workspaceRoot: string;
 
   constructor(config: {
@@ -46,6 +47,7 @@ export class TelegramInputHandler {
     controller: AgentController;
     config: AppConfig;
     voiceEnabled?: boolean;
+    onShutdown?: () => Promise<void>;
   }) {
     this.bot = config.bot;
     this.controller = config.controller;
@@ -54,6 +56,7 @@ export class TelegramInputHandler {
     this.ffmpegBinary = config.config.audio.ffmpegBinary;
     this.workspaceRoot = config.config.filesystem.workspaceRoot;
     this.voiceEnabled = config.voiceEnabled ?? true;
+    this.onShutdown = config.onShutdown;
 
     const modelPath = path.resolve(
       `./models/whisper/ggml-${config.config.audio.whisperModel}.bin`
@@ -68,6 +71,7 @@ export class TelegramInputHandler {
   async start(): Promise<void> {
     // registrado primeiro: o grammy encerra a cadeia aqui, entao /novo nunca chega em handleText
     this.bot.command(["novo", "reset"], (ctx) => this.handleReset(ctx));
+    this.bot.command(["parar", "stop"], (ctx) => this.handleStop(ctx));
     this.bot.on("message:text", (ctx) => this.handleText(ctx));
     this.bot.on(["message:voice", "message:audio"], (ctx) => this.handleVoice(ctx));
     this.bot.on("message:document", (ctx) => this.handleDocument(ctx));
@@ -101,6 +105,22 @@ export class TelegramInputHandler {
 
   private detectAudioKeyword(text: string): boolean {
     return wantsAudioReply(text);
+  }
+
+  private async handleStop(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId || !this.isWhitelisted(userId)) return;
+    if (!this.onShutdown) {
+      await ctx.reply("Encerramento nao esta disponivel nesta instancia.");
+      return;
+    }
+
+    await ctx.reply("Encerrando o GeneriClaw. Ate logo.");
+
+    // Agendado para depois deste handler retornar: o shutdown chama bot.stop(),
+    // que aguarda os handlers em andamento - chamar aqui dentro travaria.
+    const run = this.onShutdown;
+    setTimeout(() => { void run(); }, 100);
   }
 
   private async handleReset(ctx: Context): Promise<void> {
