@@ -1,17 +1,19 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
-import path from "path";
 
 const execFileAsync = promisify(execFile);
 
 export class WhisperProcessor {
   private modelPath: string;
   private binaryPath: string;
+  private language: string;
 
-  constructor(config: { modelPath: string; binaryPath: string }) {
+  constructor(config: { modelPath: string; binaryPath: string; language?: string }) {
     this.modelPath = config.modelPath;
     this.binaryPath = config.binaryPath;
+    // sem isso o whisper assume ingles e TRADUZ em vez de transcrever
+    this.language = config.language || "pt";
   }
 
   async transcribe(audioFilePath: string): Promise<string> {
@@ -25,6 +27,7 @@ export class WhisperProcessor {
         [
           "--model", this.modelPath,
           "--file", audioFilePath,
+          "--language", this.language,
           "--output-txt",
           "--output-file", audioFilePath.replace(/\.\w+$/, ""),
         ],

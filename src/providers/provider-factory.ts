@@ -1,4 +1,5 @@
 import type { ILlmProvider, LlmMessage, LlmResponse } from "./types.js";
+import type { ToolDefinition } from "../tools/registry.js";
 import { GeminiProvider } from "./gemini-provider.js";
 import { DeepSeekProvider } from "./deepseek-provider.js";
 import { GroqProvider } from "./groq-provider.js";
@@ -103,13 +104,13 @@ class FallbackProvider implements ILlmProvider {
 
   constructor(private providers: ILlmProvider[]) {}
 
-  async generate(messages: LlmMessage[]): Promise<LlmResponse> {
+  async generate(messages: LlmMessage[], tools?: ToolDefinition[]): Promise<LlmResponse> {
     let lastError: Error | undefined;
 
     for (const provider of this.providers) {
       try {
         console.info(`[FallbackProvider] Trying ${provider.name}...`);
-        const response = await provider.generate(messages);
+        const response = await provider.generate(messages, tools);
         console.info(`[FallbackProvider] ${provider.name} succeeded.`);
         return response;
       } catch (err: unknown) {

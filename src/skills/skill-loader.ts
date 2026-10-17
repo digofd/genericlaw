@@ -15,7 +15,6 @@ const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---/;
 export class SkillLoader {
   private skillsDir: string;
   private toolRegistry: ToolRegistry;
-  private watcher: fs.FSWatcher | null = null;
 
   constructor(skillsDir: string, toolRegistry: ToolRegistry) {
     this.skillsDir = skillsDir;
@@ -23,21 +22,12 @@ export class SkillLoader {
   }
 
   loadAll(): SkillManifest[] {
-    const manifests = this.readSkills();
-    this.startWatcher();
-    return manifests;
-  }
-
-  reload(): SkillManifest[] {
-    console.info("[SkillLoader] Reloading skills...");
     return this.readSkills();
   }
 
-  stopWatcher(): void {
-    if (this.watcher) {
-      this.watcher.close();
-      this.watcher = null;
-    }
+  // o AgentController chama isto a cada mensagem, por isso nenhum watcher de arquivo e necessario.
+  reload(): SkillManifest[] {
+    return this.readSkills();
   }
 
   private readSkills(): SkillManifest[] {
@@ -157,15 +147,4 @@ export class SkillLoader {
     return result;
   }
 
-  private startWatcher(): void {
-    try {
-      this.watcher = fs.watch(this.skillsDir, { recursive: true }, (_eventType, filename) => {
-        if (filename && (filename.endsWith(".md") || filename === "SKILL.md")) {
-          this.reload();
-        }
-      });
-    } catch {
-      console.warn("[SkillLoader] Could not start file watcher for skills directory.");
-    }
-  }
 }

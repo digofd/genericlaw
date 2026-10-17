@@ -7,7 +7,7 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsc",
     "start": "node dist/main.js",
-    "setup:whisper": "node dist/scripts/setup-whisper.js",
+    "setup:whisper": "tsx src/scripts/setup-whisper.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

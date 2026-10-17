@@ -1,6 +1,6 @@
 import type { ILlmProvider, LlmMessage, LlmResponse } from "../providers/types.js";
 import type { ToolRegistry, ITool, ToolResult } from "../tools/registry.js";
-import type { AgentLoopResult } from "../memory/memory-manager.js";
+import type { AgentLoopResult, TokenUsage } from "../memory/memory-manager.js";
 
 const BASE_SYSTEM_PROMPT = `Você é o GeneriClaw, um agente pessoal de IA executando localmente no desktop do usuário.
 Você responde comandos recebidos via Telegram, tem acesso a ferramentas de filesystem e pode gerar documentos.
@@ -12,9 +12,15 @@ Regras:
 4. Se precisar criar um arquivo .md, use a ferramenta criar_arquivo.
 5. Se a resposta do usuário for curta e casual, responda em texto puro.
 6. Se gerar um documento, indique claramente o nome do arquivo criado.
-7. Nunca invente resultados de ferramentas — execute-as primeiro.`;
+7. Nunca invente resultados de ferramentas — execute-as primeiro.
+8. Você PODE responder em áudio. Quando o usuário pedir áudio ou voz, apenas escreva a resposta normalmente: o sistema converte o texto em voz automaticamente. Nunca diga que não consegue gerar áudio e nunca sugira ferramentas externas de TTS.`;
 
-const MARKDOWN_FILE_REGEX = /```(?:markdown|md)\s*(?:\n|.)*?(?:[a-zA-Z0-9_\-/.]+\.md)/i;
+/** Renderizacao compacta e segura dos argumentos de tool: strings longas viram um tamanho. */
+function describeArgs(args: Record<string, unknown>): string {
+  return Object.entries(args)
+    .map(([k, v]) => `${k}=${typeof v === "string" && v.length > 80 ? `<${v.length} chars>` : JSON.stringify(v)}`)
+    .join(", ");
+}
 
 export class AgentLoop {
   private maxIterations: number;
@@ -36,9 +42,12 @@ export class AgentLoop {
   ): Promise<AgentLoopResult> {
     let toolCallsMade = 0;
     let iterationsUsed = 0;
-    let totalUsage = undefined;
+    let totalUsage: TokenUsage | undefined = undefined;
 
     const conversationMessages = [...messages];
+    // Repetir uma chamada identica anexa o mesmo resultado de novo; numa execucao real isso
+    // colocou um arquivo de 195 mil caracteres duas vezes no contexto, levando o prompt a 121k tokens.
+    const alreadyExecuted = new Set<string>();
 
     for (let i = 0; i < this.maxIterations; i++) {
       iterationsUsed = i + 1;
@@ -46,7 +55,7 @@ export class AgentLoop {
 
       let response: LlmResponse;
       try {
-        response = await provider.generate(conversationMessages);
+        response = await provider.generate(conversationMessages, toolRegistry.getToolDefinitions());
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[AgentLoop] Provider failed: ${msg}`);
@@ -57,15 +66,22 @@ export class AgentLoop {
           iterationsUsed,
           finishReason: "error",
           requiresAudioReply: false,
-          outputType: "text",
           errorMessage: msg,
         };
       }
 
       if (response.usage) {
-        totalUsage = response.usage;
+        // Cada iteracao e uma chamada faturada a parte, entao o custo do turno e a soma.
+        // Antes isso sobrescrevia, reportando apenas a ultima chamada de um turno com varias etapas.
+        totalUsage = totalUsage
+          ? {
+              promptTokens: totalUsage.promptTokens + response.usage.promptTokens,
+              completionTokens: totalUsage.completionTokens + response.usage.completionTokens,
+              totalTokens: totalUsage.totalTokens + response.usage.totalTokens,
+            }
+          : { ...response.usage };
         console.info(
-          `[AgentLoop] Tokens: prompt=${response.usage.promptTokens}, completion=${response.usage.completionTokens}, total=${response.usage.totalTokens}`
+          `[AgentLoop] Tokens: prompt=${response.usage.promptTokens}, completion=${response.usage.completionTokens}, total=${response.usage.totalTokens} (acumulado: ${totalUsage.totalTokens})`
         );
       }
 
@@ -86,6 +102,20 @@ export class AgentLoop {
           content: response.text || `Calling tool: ${toolCall.name}`,
         });
 
+        const key = `${toolCall.name}:${JSON.stringify(toolCall.arguments)}`;
+        if (alreadyExecuted.has(key)) {
+          console.warn(`[AgentLoop] Duplicate call to ${toolCall.name} suppressed.`);
+          conversationMessages.push({
+            role: "tool",
+            content:
+              `Você já chamou ${toolCall.name} com exatamente estes argumentos nesta resposta. ` +
+              `O resultado está acima — use-o em vez de repetir a chamada.`,
+            toolCallId: toolCall.id,
+          });
+          continue;
+        }
+        alreadyExecuted.add(key);
+
         const toolResult = await this.executeTool(toolCall.name, toolCall.arguments, toolRegistry);
 
         conversationMessages.push({
@@ -94,22 +124,27 @@ export class AgentLoop {
           toolCallId: toolCall.id,
         });
 
-        console.info(`[AgentLoop] Tool ${toolCall.name} executed: ${toolResult.success ? "success" : "failure"}`);
+        console.info(
+          `[AgentLoop] Tool ${toolCall.name}(${describeArgs(toolCall.arguments)}) executed: ${toolResult.success ? "success" : "failure"}`
+        );
         continue;
       }
 
-      const outputType = this.detectOutputType(response.text);
-      console.info(`[AgentLoop] Final response (${outputType})`);
+      // Resposta vazia nao e resposta valida: o Telegram recusa texto vazio com
+      // 400, entao ela apareceria como erro de pipeline em vez de resposta.
+      const text = (response.text || "").trim();
+      const failed = response.finishReason === "error" || text.length === 0;
+      console.info(`[AgentLoop] Final response (${failed ? "error" : "text"})`);
 
       return {
         conversationId: "",
-        finalResponse: response.text,
+        finalResponse: text || "Não consegui gerar uma resposta. Tente reformular o pedido.",
         toolCallsMade,
         iterationsUsed,
-        finishReason: "stop",
+        finishReason: failed ? "error" : "stop",
         requiresAudioReply: false,
-        outputType,
         usage: totalUsage,
+        errorMessage: failed ? (text || "empty response from provider") : undefined,
       };
     }
 
@@ -121,7 +156,6 @@ export class AgentLoop {
       iterationsUsed,
       finishReason: "max_iterations",
       requiresAudioReply: false,
-      outputType: "text",
       usage: totalUsage,
     };
   }
@@ -175,12 +209,5 @@ export class AgentLoop {
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, output: `Error: ${msg}`, error: msg };
     }
-  }
-
-  private detectOutputType(text: string): "text" | "file" {
-    if (MARKDOWN_FILE_REGEX.test(text)) {
-      return "file";
-    }
-    return "text";
   }
 }

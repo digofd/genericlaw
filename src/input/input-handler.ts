@@ -3,6 +3,7 @@ import type { AgentController } from "../core/agent-controller.js";
 import type { AppConfig } from "../config.js";
 import type { ProcessedInput } from "./types.js";
 import { WhisperProcessor } from "./whisper-processor.js";
+import { CriarArquivoTool } from "../tools/criar-arquivo.js";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
@@ -10,7 +11,25 @@ import path from "path";
 
 const execFileAsync = promisify(execFile);
 
-const AUDIO_KEYWORDS = ["responda em audio", "responda em áudio", "fale comigo"];
+// Comparado contra texto sem acentos, entao "audio" tambem cobre a forma acentuada.
+// Uma lista fixa de frases deixava passar pedidos comuns como "mande o resumo em audio".
+const AUDIO_REQUEST = /\b(audio|voz|falado|falada)\b|fale comigo/;
+const DIACRITICS = /[̀-ͯ]/g;
+
+/** Verdadeiro quando o usuario pediu a resposta como mensagem de voz. Exportado para testes. */
+export function wantsAudioReply(text: string): boolean {
+  const normalized = text.toLowerCase().normalize("NFD").replace(DIACRITICS, "");
+  return AUDIO_REQUEST.test(normalized);
+}
+
+const UPLOAD_PREVIEW_CHARS = 500;
+
+/** Destino, relativo ao workspace, de um documento enviado. Exportado para testes. */
+export function uploadPathFor(fileName: string, isPdf: boolean): string {
+  const base = path.basename(fileName).replace(/[^\w.\- ]+/g, "_").trim();
+  const safe = base && base !== "." ? base : "documento";
+  return isPdf ? `uploads/${safe.replace(/\.pdf$/i, "")}.md` : `uploads/${safe}`;
+}
 
 export class TelegramInputHandler {
   private bot: Bot;
@@ -20,18 +39,21 @@ export class TelegramInputHandler {
   private controller: AgentController;
   private ffmpegBinary: string;
   private voiceEnabled: boolean;
+  private workspaceRoot: string;
 
   constructor(config: {
     bot: Bot;
     controller: AgentController;
     config: AppConfig;
+    voiceEnabled?: boolean;
   }) {
     this.bot = config.bot;
     this.controller = config.controller;
     this.allowedUserIds = config.config.telegram.allowedUserIds;
     this.tmpDir = config.config.filesystem.tmpDir;
     this.ffmpegBinary = config.config.audio.ffmpegBinary;
-    this.voiceEnabled = true;
+    this.workspaceRoot = config.config.filesystem.workspaceRoot;
+    this.voiceEnabled = config.voiceEnabled ?? true;
 
     const modelPath = path.resolve(
       `./models/whisper/ggml-${config.config.audio.whisperModel}.bin`
@@ -39,10 +61,13 @@ export class TelegramInputHandler {
     this.whisper = new WhisperProcessor({
       modelPath,
       binaryPath: config.config.audio.whisperBinary,
+      language: config.config.audio.whisperLanguage,
     });
   }
 
   async start(): Promise<void> {
+    // registrado primeiro: o grammy encerra a cadeia aqui, entao /novo nunca chega em handleText
+    this.bot.command(["novo", "reset"], (ctx) => this.handleReset(ctx));
     this.bot.on("message:text", (ctx) => this.handleText(ctx));
     this.bot.on(["message:voice", "message:audio"], (ctx) => this.handleVoice(ctx));
     this.bot.on("message:document", (ctx) => this.handleDocument(ctx));
@@ -75,8 +100,18 @@ export class TelegramInputHandler {
   }
 
   private detectAudioKeyword(text: string): boolean {
-    const lower = text.toLowerCase();
-    return AUDIO_KEYWORDS.some((kw) => lower.includes(kw));
+    return wantsAudioReply(text);
+  }
+
+  private async handleReset(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId || !this.isWhitelisted(userId)) return;
+
+    const removed = this.controller.resetConversation(String(ctx.chat!.id));
+    await ctx.reply(
+      `Conversa reiniciada: ${removed} mensagem(ns) apagada(s). ` +
+      `Os arquivos já criados continuam no workspace.`
+    );
   }
 
   private async handleText(ctx: Context): Promise<void> {
@@ -187,7 +222,23 @@ export class TelegramInputHandler {
         return;
       }
 
-      const input = this.buildProcessedInput(ctx, text, "document", false);
+      // Guarda o documento e entrega um ponteiro ao modelo, nao o texto inteiro:
+      // embutido, ele seria reenviado como contexto (ate 64KB) em todos os turnos seguintes.
+      const relPath = uploadPathFor(fileName || `documento.${ext}`, isPdf);
+      const saved = await new CriarArquivoTool(this.workspaceRoot).execute({ path: relPath, content: text, overwrite: true });
+
+      let content: string;
+      if (saved.success) {
+        content =
+          `O usuário enviou o arquivo "${fileName}". O conteúdo foi salvo em "${relPath}" ` +
+          `(${text.length} caracteres). Use a ferramenta ler_arquivo para ler o conteúdo completo quando precisar.\n\n` +
+          `Início do conteúdo:\n${text.slice(0, UPLOAD_PREVIEW_CHARS)}`;
+      } else {
+        console.warn(`[TelegramInputHandler] Could not store upload: ${saved.output}`);
+        content = text;
+      }
+
+      const input = this.buildProcessedInput(ctx, content, "document", false);
       await this.controller.handle(input, ctx);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

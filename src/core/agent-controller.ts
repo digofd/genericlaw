@@ -25,11 +25,6 @@ export interface AgentControllerDeps {
   config: AppConfig;
 }
 
-export interface AgentControllerHandle {
-  input: ProcessedInput;
-  ctx: Context;
-}
-
 export class AgentController {
   private memoryManager: MemoryManager;
   private agentLoop: AgentLoop;
@@ -69,7 +64,9 @@ export class AgentController {
 
     const currentCount = this.pendingCount.get(conversationId) || 0;
     if (currentCount >= MAX_PENDING_PER_CONVERSATION) {
-      console.warn(`[AgentController] Message queue full for conversation ${conversationId}. Dropping oldest pending.`);
+      console.warn(`[AgentController] Queue full for conversation ${conversationId}; rejecting this message.`);
+      await ctx.reply("⚠️ Ainda estou processando suas mensagens anteriores. Aguarde um momento e tente de novo.")
+        .catch(() => { /* user may have blocked the bot */ });
       return;
     }
 
@@ -105,14 +102,18 @@ export class AgentController {
   }
 
   private async process(input: ProcessedInput, ctx: Context): Promise<void> {
-    const { conversationId, userId, content, requiresAudioReply } = input;
-    console.info(`[AgentController] input -> processing conversation ${conversationId}`);
+    const { conversationId, userId, content, requiresAudioReply, source } = input;
+    console.info(
+      `[AgentController] input (${source}${requiresAudioReply ? ", audio reply" : ""}) -> processing conversation ${conversationId}`
+    );
 
     const outputHandler = new TelegramOutputHandler(
       ctx,
       {
         ttsVoiceId: this.config.audio.ttsVoiceId,
         tmpDir: this.config.filesystem.tmpDir,
+        edgeTtsBinary: this.config.audio.edgeTtsBinary,
+        ffmpegBinary: this.config.audio.ffmpegBinary,
       },
       this.eventEmitter
     );
@@ -125,7 +126,7 @@ export class AgentController {
 
       let conversation = this.memoryManager.getConversation(conversationId);
       if (!conversation) {
-        conversation = this.memoryManager.createConversation(userId);
+        conversation = this.memoryManager.createConversation(userId, conversationId);
       }
 
       const availableSkills = this.skillLoader.reload();
@@ -154,18 +155,11 @@ export class AgentController {
       }
 
       const systemPrompt = this.agentLoop.getBaseSystemPrompt();
-      const toolDefs = this.toolRegistry.getToolDefinitions();
 
+      // tools vao ao provider como function declarations nativas, nao como texto de prompt
       const messages: LlmMessage[] = [
         { role: "system", content: systemPrompt },
       ];
-
-      if (toolDefs.length > 0) {
-        messages.push({
-          role: "system",
-          content: `You have access to the following tools. Use them when needed:\n${JSON.stringify(toolDefs, null, 2)}`,
-        });
-      }
 
       if (skillName) {
         const skillManifest = availableSkills.find((s) => s.name === skillName);
@@ -174,11 +168,10 @@ export class AgentController {
         }
       }
 
+      // recentMessages ja termina com o turno do usuario salvo acima - nao empurrar de novo
       for (const msg of recentMessages) {
         messages.push({ role: msg.role, content: msg.content });
       }
-
-      messages.push({ role: "user", content });
 
       console.info(`[AgentController] agent -> processing with ${messages.length} messages`);
 
@@ -197,7 +190,16 @@ export class AgentController {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[AgentController] Pipeline error: ${msg}`);
+      // Nunca falhar em silencio: uma excecao nao reportada aqui e indistinguivel do bot
+      // ignorando o usuario, o que esconde bugs de pipeline indefinidamente.
+      await outputHandler
+        .sendError("Não consegui processar sua mensagem. Tente novamente em instantes.")
+        .catch(() => { /* user may have blocked the bot */ });
     }
+  }
+
+  resetConversation(conversationId: string): number {
+    return this.memoryManager.clearMessages(conversationId);
   }
 
   async shutdown(): Promise<void> {

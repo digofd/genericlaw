@@ -4,7 +4,7 @@
 
 ## 1. Resumo
 
-O `MemoryManager` e o facade central da camada de persistencia do GeneriClaw. Ele expoe uma interface unificada para inicializacao do banco, gerenciamento de conversas, persistencia de mensagens, controle de janela de contexto, truncamento, e bloqueio de usuarios. Nenhum outro modulo acessa `ConversationRepository` ou `MessageRepository` diretamente — toda operacao de persistencia passa pelo facade.
+O `MemoryManager` e o facade central da camada de persistencia do GeneriClaw. Ele expoe uma interface unificada para inicializacao do banco, gerenciamento de conversas, persistencia de mensagens, controle de janela de contexto, truncamento, e bloqueio de usuarios. Nenhum outro modulo acessa `ConversationRepository` ou `MessageRepository` diretamente - toda operacao de persistencia passa pelo facade.
 
 ---
 
@@ -39,7 +39,7 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 ## 4. Non-Goals (Fora do Escopo)
 
 - NG-01: MemoryManager nao implementa SQL diretamente. SQL e responsabilidade dos repositorios.
-- NG-02: MemoryManager nao gerencia schema migrations. Isso e feito pelo Singleton de DB na inicializacao (ver memory.md secao 9).
+- NG-02: MemoryManager nao expoe migrations como API publica. `runMigrations()` e privado e roda uma vez em `initialize()`, junto com a criacao do Singleton de DB (ver memory.md secao 9 e 8.5 abaixo).
 - NG-03: MemoryManager nao gerencia tokens nem calcula custos. Isso e responsabilidade do AgentLoop e ProviderFactory.
 
 ---
@@ -59,8 +59,9 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 | ID | Requisito | Prioridade | Criterio de Aceite |
 |----|-----------|-----------|-------------------|
 | RF-01 | `initialize()` deve criar conexao SQLite, executar PRAGMAs, criar tabelas se nao existirem. | Must | Chamar `initialize()` cria arquivo `db.sqlite` com schema correto. |
-| RF-02 | `createConversation(userId, provider)` deve criar nova conversa e retornar o objeto `Conversation`. | Must | Conversa aparece em `findByUserId()`. |
-| RF-03 | `getRecentMessages(conversationId)` deve retornar as ultimas `MEMORY_WINDOW_SIZE` mensagens da conversa. | Must | Retorna array com no maximo `MEMORY_WINDOW_SIZE` mensagens, ordenadas por `created_at` ascendente. |
+| RF-02 | `createConversation(userId, id?)` deve criar nova conversa e retornar o objeto `Conversation`. | Must | A conversa e localizavel por `getConversation(id)`. |
+| RF-02b | `clearMessages(conversationId)` apaga o historico mantendo a linha da conversa, e retorna quantas mensagens removeu. | Must | Apos limpar, `getRecentMessages()` volta vazio e a proxima mensagem salva sem erro. |
+| RF-03 | `getRecentMessages(conversationId)` deve retornar as ultimas `MEMORY_WINDOW_SIZE` mensagens da conversa. | Must | Retorna array com no maximo `MEMORY_WINDOW_SIZE` mensagens, ordenadas por `id` ascendente (ordem de insercao). |
 | RF-04 | `saveMessage(conversationId, role, content, metadata?)` deve persistir mensagem e disparar truncamento se necessario. | Must | Mensagem aparece em `getRecentMessages()`. Se `COUNT > MEMORY_WINDOW_SIZE * 4`, mensagens antigas sao truncadas. |
 | RF-05 | `saveResponse(conversationId, result)` deve persistir a resposta final do AgentLoop. | Must | Resposta aparece no historico. Conteudo acima de 64KB e truncado antes da insercao. |
 | RF-06 | `markConversationBlocked(conversationId)` deve setar `blocked = 1` na conversa. | Must | `isConversationBlocked()` retorna `true` apos chamada. |
@@ -72,7 +73,7 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 ### 6.2 Fluxo Principal (Happy Path)
 
 1. Bootstrap chama `MemoryManager.initialize()`. Conexao SQLite e criada, PRAGMAs executados, tabelas criadas.
-2. Usuario envia primeira mensagem. AgentController chama `createConversation(userId, 'gemini')`. Retorna `Conversation` com UUID gerado.
+2. Usuario envia primeira mensagem. AgentController chama `createConversation(userId, conversationId)` passando o id do chat do Telegram. Retorna a `Conversation` com esse id.
 3. AgentController chama `saveMessage(conversationId, 'user', 'Oi agente')`.
 4. AgentController chama `getRecentMessages(conversationId)`. Retorna array com a mensagem recem-persistida.
 5. Apos AgentLoop retornar `AgentLoopResult`, AgentController chama `saveResponse(conversationId, result)`.
@@ -82,13 +83,13 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 
 ### 6.3 Fluxos Alternativos
 
-**Fluxo Alternativo A — Usuario bloqueado:**
+**Fluxo Alternativo A - Usuario bloqueado:**
 1. OutputHandler detecta erro 403 "Forbidden" ao enviar resposta.
 2. OutputHandler emite evento `userBlocked`.
 3. AgentController captura e chama `MemoryManager.markConversationBlocked(conversationId)`.
-4. Proxima mensagem do usuario: AgentController chama `isConversationBlocked(conversationId)` → `true`. Processamento descartado.
+4. Proxima mensagem do usuario: AgentController chama `isConversationBlocked(conversationId)` -> `true`. Processamento descartado.
 
-**Fluxo Alternativo B — Truncamento de mensagem longa:**
+**Fluxo Alternativo B - Truncamento de mensagem longa:**
 1. `saveResponse` recebe conteudo de 80KB.
 2. `MemoryManager` trunca para 65536 bytes (UTF-8).
 3. Loga warning: `[MemoryManager] Message content truncated from 81920 to 65536 bytes.`
@@ -98,7 +99,7 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 
 ## 7. Requisitos Nao-Funcionais
 
-Ver memory.md seção 7 para os requisitos não-funcionais de persistência. MemoryManager herda os mesmos SLAs via delegação aos repositórios.
+Ver memory.md secao 7 para os requisitos nao-funcionais de persistencia. MemoryManager herda os mesmos SLAs via delegacao aos repositorios.
 
 ---
 
@@ -141,6 +142,7 @@ class MemoryManager {
   private conversationRepo: ConversationRepository;
   private messageRepo: MessageRepository;
   private insertCounter: number;
+  private dirty: boolean;   // ver 8.5
 
   constructor(config: { dbPath: string; windowSize: number; dbMaxSizeMb: number });
 
@@ -149,7 +151,7 @@ class MemoryManager {
   async shutdown(): Promise<void>;
 
   // Conversas
-  createConversation(userId: string, provider?: string): Conversation;
+  createConversation(userId: string, id?: string): Conversation;
   getConversation(conversationId: string): Conversation | null;
   getConversationsByUser(userId: string): Conversation[];
   updateConversationTitle(conversationId: string, title: string): void;
@@ -165,6 +167,7 @@ class MemoryManager {
   ): Message;
   saveResponse(conversationId: string, result: AgentLoopResult): void;
   getRecentMessages(conversationId: string): Message[];
+  clearMessages(conversationId: string): number;   // /novo - apaga historico, mantem a conversa
 
   // Bloqueio de usuario
   markConversationBlocked(conversationId: string): void;
@@ -177,7 +180,7 @@ class MemoryManager {
 
 ### 8.4 Database Singleton
 
-A conexao SQLite e gerenciada como Singleton para garantir uma unica instancia de `better-sqlite3.Database` em todo o processo. O Singleton e encapsulado dentro do `MemoryManager` — a instancia de `Database` e criada em `initialize()` e fechada em `shutdown()`. Nenhum outro modulo acessa `new Database(...)` diretamente.
+A conexao SQLite e gerenciada como Singleton para garantir uma unica instancia de `Database` (sql.js) em todo o processo. O Singleton e encapsulado dentro do `MemoryManager` - a instancia de `Database` e criada em `initialize()` e fechada em `shutdown()`. Nenhum outro modulo acessa `new Database(...)` diretamente.
 
 ```typescript
 // Padrao: Singleton via lazy initialization gerenciada pelo facade
@@ -208,9 +211,30 @@ class MemoryManager {
 
 **Contrato:**
 - `dbInstance` e estatica e privada. Apenas `MemoryManager` gerencia seu ciclo de vida.
-- `initialize()` e idempotente — chamadas repetidas reutilizam a conexao existente.
+- `initialize()` e idempotente - chamadas repetidas reutilizam a conexao existente.
 - `shutdown()` fecha a conexao e zera `dbInstance`. Apos shutdown, uma nova chamada a `initialize()` cria uma nova conexao.
 - O padrao Singleton garante que `ConversationRepository` e `MessageRepository` (instanciados internamente pelo facade) compartilhem a mesma conexao sem necessidade de injecao explicita.
+- Consequencia para testes: duas instancias de `MemoryManager` no mesmo processo compartilham o banco silenciosamente. Testes precisam chamar `shutdown()` entre casos.
+
+### 8.5 Persistencia em disco
+
+O backend e `sql.js` (SQLite compilado para wasm), que opera em memoria. Persistir significa
+exportar o banco inteiro e reescrever o arquivo - nao ha escrita incremental.
+
+**Flag de sujeira:** um timer de 5 segundos chama `saveToDisk()`, que retorna imediatamente se nada
+mudou. Sem isso, um banco de ate `DB_MAX_SIZE_MB` (padrao 500) seria serializado e reescrito a cada
+5 segundos mesmo com o bot ocioso.
+
+Marcam o banco como sujo: `saveMessage()`, `createConversation()`, `updateConversationTitle()`,
+`markConversationBlocked()`, `clearMessages()` e **`runMigrations()`**.
+
+**Migracoes contam como escrita.** Se `runMigrations()` nao marcar sujeira, o novo schema existe
+apenas em memoria: o arquivo mantem o schema antigo, a migracao reexecuta a cada boot, e so e
+persistida quando alguma escrita de linha nao relacionada acontece.
+
+**Ordem no shutdown:** `saveToDisk()` roda **antes** de `isShutdown = true`, porque a propria
+guarda de `saveToDisk()` aborta quando essa flag esta ligada. Inverter a ordem faz todo shutdown
+limpo descartar as mudancas pendentes.
 
 ---
 
@@ -224,7 +248,7 @@ MemoryManager nao define schema proprio. O schema SQLite esta documentado em `me
 
 | Dependencia | Tipo | Impacto se indisponivel |
 |-------------|------|------------------------|
-| `better-sqlite3` | Obrigatoria | Sem driver, initialize() falha. |
+| `sql.js` | Obrigatoria | Sem driver, initialize() falha. |
 | `ConversationRepository` | Interna | Operacoes de conversa delegadas a este repositorio. |
 | `MessageRepository` | Interna | Operacoes de mensagem delegadas a este repositorio. |
 | Filesystem (`fs`) | Obrigatoria | DB path deve ser acessivel. |
@@ -241,21 +265,21 @@ MemoryManager nao define schema proprio. O schema SQLite esta documentado em `me
 | EC-04: Conteudo excede 64KB | Resposta do LLM > 65536 bytes. | Truncado para 65536 bytes (UTF-8) antes da insercao. Warning logado. |
 | EC-05: Vacuum periodico | Contador de insercoes atinge 500. | `PRAGMA incremental_vacuum` executado. Contador resetado. |
 | EC-06: DB excede tamanho maximo | Arquivo `.db` > `DB_MAX_SIZE_MB` na inicializacao. | `VACUUM` completo executado. Warning logado. |
-| EC-07: Operacao apos shutdown | Chamada a qualquer metodo publico apos `shutdown()`. | Lanca erro: `"MemoryManager is shut down."` Um flag interno `isShutdown` controla isso — setado como `true` no inicio de `shutdown()` e verificado no inicio de cada metodo publico. Este guard previne comportamento indefinido durante race conditions entre shutdown e mensagens em voo. |
+| EC-07: Operacao apos shutdown | Chamada a qualquer metodo publico apos `shutdown()`. | Lanca erro: `"MemoryManager is shut down."` Um flag interno `isShutdown` controla isso - setado como `true` no inicio de `shutdown()` e verificado no inicio de cada metodo publico. Este guard previne comportamento indefinido durante race conditions entre shutdown e mensagens em voo. |
 ---
 
 ## 12. Seguranca e Privacidade
 
 - **DB path:** Configurado via `DB_PATH`. Arquivo nunca commitado no Git.
 - **Sem logs de conteudo:** MemoryManager nao loga conteudo de mensagens. Apenas metadados (ID, role, tamanho).
-- **Truncamento seguro:** Conteudo truncado preserva integridade UTF-8 — nao corta no meio de um caractere multi-byte.
+- **Truncamento seguro:** Conteudo truncado preserva integridade UTF-8 - nao corta no meio de um caractere multi-byte.
 
 ---
 
 ## 13. Plano de Rollout
 
 1. Implementar `MemoryManager` com `initialize()` e `shutdown()`.
-2. Adicionar `createConversation()` e `saveMessage()`.
+2. Adicionar `createConversation()`, `saveMessage()` e `clearMessages()`.
 3. Adicionar `getRecentMessages()` com `MEMORY_WINDOW_SIZE`.
 4. Adicionar `saveResponse()` com truncamento de 64KB.
 5. Adicionar `markConversationBlocked()` e `isConversationBlocked()`.
@@ -265,4 +289,4 @@ MemoryManager nao define schema proprio. O schema SQLite esta documentado em `me
 
 ## 14. Open Questions
 
-(Nenhuma no momento — este spec foi criado para resolver o gap critico de documentacao.)
+(Nenhuma no momento - este spec foi criado para resolver o gap critico de documentacao.)

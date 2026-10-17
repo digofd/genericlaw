@@ -1,12 +1,16 @@
 import type { Context } from "grammy";
+import { InputFile } from "grammy";
 import type { AgentLoopResult } from "../memory/memory-manager.js";
 import { EdgeTTSProcessor } from "./edge-tts.js";
 import { EventEmitter } from "events";
 import fs from "fs";
-import path from "path";
-import { v4 as uuidv4 } from "uuid";
 
 const CHUNK_SIZE = 4000;
+
+// o edge-tts escala mal: ~500 chars levam 9s, ~3000 levam 78s, ~7000 nunca terminou.
+// Um audio de varios minutos tambem e ruim de ouvir, entao a parte falada tem teto e
+// a resposta completa vai em seguida como texto.
+const TTS_MAX_CHARS = 2000;
 
 export interface OutputStrategy {
   send(ctx: Context, result: AgentLoopResult): Promise<void>;
@@ -14,7 +18,8 @@ export interface OutputStrategy {
 
 export class TextOutputStrategy implements OutputStrategy {
   async send(ctx: Context, result: AgentLoopResult): Promise<void> {
-    const text = result.finalResponse;
+    // o Telegram recusa texto vazio com 400; nunca deixar um chegar na API
+    const text = result.finalResponse?.trim() || "(resposta vazia)";
 
     if (text.length <= CHUNK_SIZE) {
       await ctx.reply(text);
@@ -32,39 +37,11 @@ export class TextOutputStrategy implements OutputStrategy {
   }
 }
 
-export class FileOutputStrategy implements OutputStrategy {
-  private tmpDir: string;
-
-  constructor(tmpDir: string) {
-    this.tmpDir = tmpDir;
-  }
-
-  async send(ctx: Context, result: AgentLoopResult): Promise<void> {
-    if (!fs.existsSync(this.tmpDir)) {
-      fs.mkdirSync(this.tmpDir, { recursive: true });
-    }
-
-    const filename = `output-${uuidv4()}.md`;
-    const filePath = path.resolve(this.tmpDir, filename);
-
-    try {
-      fs.writeFileSync(filePath, result.finalResponse, "utf-8");
-      await ctx.replyWithDocument(filePath, {
-        caption: "Aqui está o documento gerado.",
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`File output failed: ${msg}`);
-    } finally {
-      try {
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      } catch {}
-    }
-  }
-}
-
 export class AudioOutputStrategy implements OutputStrategy {
   private tts: EdgeTTSProcessor;
+  // os dois caminhos de fallback passam pelo divisor de blocos: ctx.reply() recusa
+  // qualquer coisa acima de 4096 chars, entao uma resposta longa falhava duas vezes
+  private readonly text = new TextOutputStrategy();
 
   constructor(tts: EdgeTTSProcessor) {
     this.tts = tts;
@@ -74,20 +51,35 @@ export class AudioOutputStrategy implements OutputStrategy {
     try {
       const available = await this.tts.isAvailable();
       if (!available) {
-        await ctx.reply(result.finalResponse);
+        await this.text.send(ctx, result);
         return;
       }
 
-      const audioPath = await this.tts.synthesize(result.finalResponse);
+      const full = result.finalResponse;
+      const abbreviated = full.length > TTS_MAX_CHARS;
+      const spoken = abbreviated
+        ? `${full.slice(0, TTS_MAX_CHARS)} ... Resposta abreviada. O texto completo segue na próxima mensagem.`
+        : full;
+
+      const audioPath = await this.tts.synthesize(spoken);
       try {
-        await ctx.replyWithVoice(audioPath);
+        // o grammy trata uma string crua como file_id ou URL; um caminho do Windows vira
+        // uma URL com porta invalida. Arquivos locais precisam ir dentro de InputFile.
+        await ctx.replyWithVoice(new InputFile(audioPath));
       } finally {
         try {
           if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath);
         } catch {}
       }
-    } catch {
-      await ctx.reply(result.finalResponse);
+
+      // nada se perde quando a resposta era longa demais para narrar
+      if (abbreviated) await this.text.send(ctx, result);
+    } catch (err: unknown) {
+      // cair para texto e o certo, mas fazer isso em silencio escondia um pipeline de
+      // audio quebrado atras do que parecia uma resposta normal
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[AudioOutputStrategy] Voice reply failed, sending text instead: ${msg}`);
+      await this.text.send(ctx, result);
     }
   }
 }
@@ -103,18 +95,20 @@ export class TelegramOutputHandler {
   private strategies: Map<string, OutputStrategy>;
   private ctx: Context;
   private eventEmitter: EventEmitter;
-  private tmpDir: string;
 
-  constructor(ctx: Context, config: { ttsVoiceId: string; tmpDir: string }, eventEmitter: EventEmitter) {
+  constructor(ctx: Context, config: { ttsVoiceId: string; tmpDir: string; edgeTtsBinary?: string; ffmpegBinary?: string }, eventEmitter: EventEmitter) {
     this.ctx = ctx;
-    this.tmpDir = config.tmpDir;
     this.eventEmitter = eventEmitter;
 
-    const tts = new EdgeTTSProcessor({ voice: config.ttsVoiceId, tempDir: config.tmpDir });
+    const tts = new EdgeTTSProcessor({
+      voice: config.ttsVoiceId,
+      tempDir: config.tmpDir,
+      binary: config.edgeTtsBinary,
+      ffmpegBinary: config.ffmpegBinary,
+    });
 
     this.strategies = new Map();
     this.strategies.set("text", new TextOutputStrategy());
-    this.strategies.set("file", new FileOutputStrategy(config.tmpDir));
     this.strategies.set("audio", new AudioOutputStrategy(tts));
     this.strategies.set("error", new ErrorOutputStrategy());
   }
@@ -124,8 +118,6 @@ export class TelegramOutputHandler {
 
     if (result.finishReason === "error") {
       strategy = this.strategies.get("error")!;
-    } else if (result.outputType === "file") {
-      strategy = this.strategies.get("file")!;
     } else if (result.requiresAudioReply) {
       strategy = this.strategies.get("audio")!;
     } else {
@@ -161,6 +153,6 @@ export class TelegramOutputHandler {
   }
 
   async sendError(text: string): Promise<void> {
-    await this.ctx.reply(`\u26a0\ufe0f ${text}`);
+    await this.ctx.reply(`\u26a0\ufe0f ${text.trim() || "Erro desconhecido."}`);
   }
 }

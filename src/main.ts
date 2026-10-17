@@ -16,17 +16,23 @@ import { TelegramInputHandler } from "./input/input-handler.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10000;
 
+const WHICH = process.platform === "win32" ? "where" : "which";
+
 function checkBinary(name: string): Promise<boolean> {
+  // where/which so consultam o PATH; um caminho configurado precisa ser checado no disco
+  if (name.includes("/") || name.includes("\\")) {
+    return Promise.resolve(fs.existsSync(name));
+  }
   return new Promise((resolve) => {
-    execFile("where", [name], { timeout: 5000 }, (err) => {
+    execFile(WHICH, [name], { timeout: 5000 }, (err) => {
       resolve(err === null);
     });
   });
 }
 
-function checkEdgeTTS(): Promise<boolean> {
+function checkEdgeTTS(binary: string): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile("edge-tts", ["--version"], { timeout: 5000 }, (err) => {
+    execFile(binary, ["--version"], { timeout: 5000 }, (err) => {
       resolve(err === null);
     });
   });
@@ -66,7 +72,7 @@ async function main(): Promise<void> {
     console.warn("[Bootstrap] ffmpeg not found — voice input disabled.");
   }
 
-  const edgeTTSAvailable = await checkEdgeTTS();
+  const edgeTTSAvailable = await checkEdgeTTS(config.audio.edgeTtsBinary);
   if (!edgeTTSAvailable) {
     console.warn("[Bootstrap] edge-tts not found — voice output disabled.");
   }
@@ -143,6 +149,7 @@ async function main(): Promise<void> {
     bot,
     controller,
     config,
+    voiceEnabled: ffmpegAvailable && whisperAvailable,
   });
 
   let isShuttingDown = false;
@@ -162,9 +169,6 @@ async function main(): Promise<void> {
       await inputHandler.stop();
       console.info("[Bootstrap] Bot polling stopped.");
 
-      skillLoader.stopWatcher();
-      console.info("[Bootstrap] Skill watcher stopped.");
-
       await controller.shutdown();
       console.info("[Bootstrap] Controller shut down.");
 
@@ -182,8 +186,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   try {
-    await inputHandler.start();
+    // start() so resolve quando o polling para, entao loga que esta pronto antes de aguardar
     console.info("[Bootstrap] GeneriClaw is running.");
+    await inputHandler.start();
   } catch (err: unknown) {
     console.error(`[Bootstrap] Failed to start bot: ${err}`);
     await shutdown();

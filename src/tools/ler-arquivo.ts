@@ -1,9 +1,13 @@
 import fs from "fs";
 import path from "path";
-import { BaseTool } from "./registry.js";
+import { BaseTool, resolveInWorkspace, truncateUtf8 } from "./registry.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
-const DEFAULT_MAX_BYTES = 65536;
+// O resultado de uma tool fica no contexto do loop em todas as iteracoes seguintes, entao
+// uma leitura grande e paga varias vezes. O teto NAO e sobrescrevivel: um modelo pediu
+// maxBytes=200000 e levou um prompt a 121k tokens. Ele pagina com offset no lugar.
+const DEFAULT_MAX_BYTES = 8192;
+const MAX_BYTES_CEILING = 32768;
 
 export class LerArquivoTool extends BaseTool {
   private workspaceRoot: string;
@@ -20,7 +24,8 @@ export class LerArquivoTool extends BaseTool {
       type: "object",
       properties: {
         path: { type: "string", description: "Caminho relativo ao WORKSPACE_ROOT. Ex: 'specs/PRD.md'" },
-        maxBytes: { type: "number", description: "Limite opcional de bytes a ler. Padrão: 65536 (64KB)." },
+        maxBytes: { type: "number", description: "Bytes a ler nesta chamada. Padrão: 8192 (8KB). Máximo: 32768 (32KB) — valores maiores são reduzidos a esse limite." },
+        offset: { type: "number", description: "Byte inicial da leitura. Padrão: 0. Para ler um arquivo grande, repita a chamada usando o offset indicado no final da resposta anterior." },
       },
       required: ["path"],
     },
@@ -28,16 +33,16 @@ export class LerArquivoTool extends BaseTool {
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
     const inputPath = args.path as string;
-    const maxBytes = (args.maxBytes as number) || DEFAULT_MAX_BYTES;
+    const requested = Number(args.maxBytes) || DEFAULT_MAX_BYTES;
+    const maxBytes = Math.min(Math.max(1, requested), MAX_BYTES_CEILING);
+    const offset = Math.max(0, Number(args.offset) || 0);
 
     if (path.isAbsolute(inputPath)) {
       return { success: false, output: "Erro: use caminho relativo ao workspace.", error: "absolute path" };
     }
 
-    const resolved = path.resolve(process.cwd(), this.workspaceRoot, inputPath);
-    const workspaceAbs = path.resolve(process.cwd(), this.workspaceRoot);
-
-    if (!resolved.startsWith(workspaceAbs)) {
+    const resolved = resolveInWorkspace(this.workspaceRoot, inputPath);
+    if (!resolved) {
       return { success: false, output: "Erro: caminho fora do workspace permitido.", error: "path traversal" };
     }
 
@@ -54,15 +59,30 @@ export class LerArquivoTool extends BaseTool {
       const fullContent = fs.readFileSync(resolved, "utf-8");
       const buf = Buffer.from(fullContent, "utf-8");
 
-      if (buf.length > maxBytes) {
-        console.warn(
-          `[LerArquivoTool] Arquivo truncado de ${buf.length} para ${maxBytes} bytes.`
-        );
-        const truncated = buf.subarray(0, maxBytes).toString("utf-8");
-        return { success: true, output: truncated };
+      if (offset >= buf.length && buf.length > 0) {
+        return {
+          success: false,
+          output: `Erro: offset ${offset} está além do fim do arquivo (${buf.length} bytes).`,
+          error: "offset out of range",
+        };
       }
 
-      return { success: true, output: fullContent };
+      const end = Math.min(buf.length, offset + maxBytes);
+      let chunk = buf.subarray(offset, end).toString("utf-8");
+
+      if (end < buf.length) {
+        // nunca emitir um caractere que o corte partiu ao meio; o offset fica na fronteira
+        chunk = chunk.replace(/�+$/, "");
+        const nextOffset = offset + Buffer.byteLength(chunk, "utf-8");
+        console.warn(`[LerArquivoTool] Leitura parcial: bytes ${offset}-${nextOffset} de ${buf.length}.`);
+        // o modelo precisa saber que nao viu o arquivo inteiro
+        return {
+          success: true,
+          output: `${chunk}\n\n[...leitura parcial: bytes ${offset}-${nextOffset} de ${buf.length}. Chame ler_arquivo novamente com offset=${nextOffset} para continuar.]`,
+        };
+      }
+
+      return { success: true, output: chunk };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return { success: false, output: "Erro: arquivo não é texto UTF-8 válido.", error: msg };

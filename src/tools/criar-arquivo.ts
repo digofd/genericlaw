@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { BaseTool } from "./registry.js";
+import { BaseTool, resolveInWorkspace } from "./registry.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
 export class CriarArquivoTool extends BaseTool {
@@ -14,12 +14,13 @@ export class CriarArquivoTool extends BaseTool {
   readonly definition: ToolDefinition = {
     name: "criar_arquivo",
     description:
-      "Cria ou sobrescreve um arquivo de texto no workspace. Retorna confirmação com caminho relativo e tamanho em bytes.",
+      "Cria um arquivo de texto no workspace. Falha se o arquivo já existir, a menos que overwrite=true. Retorna confirmação com caminho relativo e tamanho em bytes.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "Caminho relativo ao WORKSPACE_ROOT. Ex: 'specs/novo-arquivo.md'" },
         content: { type: "string", description: "Conteúdo do arquivo em UTF-8." },
+        overwrite: { type: "boolean", description: "Defina true para substituir um arquivo que já existe. Padrão: false." },
       },
       required: ["path", "content"],
     },
@@ -33,11 +34,17 @@ export class CriarArquivoTool extends BaseTool {
       return { success: false, output: "Erro: use caminho relativo ao workspace.", error: "absolute path" };
     }
 
-    const resolved = path.resolve(process.cwd(), this.workspaceRoot, inputPath);
-    const workspaceAbs = path.resolve(process.cwd(), this.workspaceRoot);
-
-    if (!resolved.startsWith(workspaceAbs)) {
+    const resolved = resolveInWorkspace(this.workspaceRoot, inputPath);
+    if (!resolved) {
       return { success: false, output: "Erro: caminho fora do workspace permitido.", error: "path traversal" };
+    }
+
+    if (args.overwrite !== true && fs.existsSync(resolved)) {
+      return {
+        success: false,
+        output: `Erro: '${inputPath}' já existe. Para substituir, chame novamente com overwrite=true.`,
+        error: "already exists",
+      };
     }
 
     try {

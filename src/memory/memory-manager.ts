@@ -17,7 +17,6 @@ export interface AgentLoopResult {
   iterationsUsed: number;
   finishReason: "stop" | "max_iterations" | "error";
   requiresAudioReply: boolean;
-  outputType: "text" | "file";
   usage?: TokenUsage;
   errorMessage?: string;
 }
@@ -38,6 +37,7 @@ export class MemoryManager {
   private conversationRepo!: ConversationRepository;
   private messageRepo!: MessageRepository;
   private insertCounter = 0;
+  private dirty = false;
   private isShutdown = false;
   private dbPath: string;
   private windowSize: number;
@@ -75,7 +75,7 @@ export class MemoryManager {
         this.db = new SQL.Database();
       }
 
-      this.db.run("PRAGMA journal_mode=WAL;");
+      // sem journal_mode aqui: o sql.js e um build wasm em memoria, entao WAL nao faz nada
       this.db.run("PRAGMA foreign_keys=ON;");
       this.db.run("PRAGMA auto_vacuum=INCREMENTAL;");
 
@@ -99,11 +99,12 @@ export class MemoryManager {
   }
 
   private saveToDisk(): void {
-    if (!this.db || this.isShutdown) return;
+    if (!this.db || this.isShutdown || !this.dirty) return;
     try {
       const data = this.db.export();
       const buffer = Buffer.from(data);
       fs.writeFileSync(this.dbPath, buffer);
+      this.dirty = false;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[MemoryManager] Failed to save database: ${msg}`);
@@ -111,14 +112,14 @@ export class MemoryManager {
   }
 
   async shutdown(): Promise<void> {
+    // precisa rodar antes de isShutdown ser setado: saveToDisk() aborta com essa flag ligada
+    this.saveToDisk();
     this.isShutdown = true;
 
     if (this.saveInterval) {
       clearInterval(this.saveInterval);
       this.saveInterval = null;
     }
-
-    this.saveToDisk();
 
     if (this.db) {
       this.db.close();
@@ -136,6 +137,10 @@ export class MemoryManager {
   }
 
   private runMigrations(): void {
+    // Mudanca de schema tambem e escrita: sem isso a guarda de flag suja em
+    // saveToDisk() descarta a migracao e o arquivo mantem o schema anterior.
+    this.dirty = true;
+
     this.db.run(`
       CREATE TABLE IF NOT EXISTS conversations (
         id            TEXT PRIMARY KEY,
@@ -165,8 +170,14 @@ export class MemoryManager {
       )
     `);
 
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at)");
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(conversation_id, role)");
+    // Toda consulta de mensagem ordena por id, nao por created_at (ver repositories.ts),
+    // entao o indice antigo em created_at forcava uma ordenacao. O indice por role nao era
+    // usado por consulta nenhuma; ambos custavam uma escrita a cada insercao.
+    // Nome novo de proposito: CREATE INDEX IF NOT EXISTS manteria silenciosamente a
+    // definicao antiga do indice num banco ja existente.
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id, id)");
+    this.db.run("DROP INDEX IF EXISTS idx_messages_conversation");
+    this.db.run("DROP INDEX IF EXISTS idx_messages_role");
   }
 
   private async checkDbSize(): Promise<void> {
@@ -202,9 +213,10 @@ export class MemoryManager {
     }
   }
 
-  createConversation(userId: string, provider?: string): Conversation {
+  createConversation(userId: string, id?: string): Conversation {
+    this.dirty = true;
     this.ensureInitialized();
-    return this.conversationRepo.create(userId, provider);
+    return this.conversationRepo.create(userId, id);
   }
 
   getConversation(conversationId: string): Conversation | null {
@@ -218,6 +230,7 @@ export class MemoryManager {
   }
 
   updateConversationTitle(conversationId: string, title: string): void {
+    this.dirty = true;
     this.ensureInitialized();
     this.conversationRepo.updateTitle(conversationId, title);
   }
@@ -231,6 +244,7 @@ export class MemoryManager {
     metadata?: string
   ): Message {
     this.ensureInitialized();
+    this.dirty = true;
     const sanitized = this.sanitizeContent(content);
     const msg = this.messageRepo.create(conversationId, role, sanitized, toolName, toolCallId, metadata);
     this.maybeVacuum();
@@ -252,7 +266,6 @@ export class MemoryManager {
     metadata.finishReason = result.finishReason;
     metadata.toolCallsMade = result.toolCallsMade;
     metadata.iterationsUsed = result.iterationsUsed;
-    metadata.outputType = result.outputType;
 
     this.saveMessage(conversationId, "assistant", result.finalResponse, undefined, undefined, JSON.stringify(metadata));
   }
@@ -263,6 +276,7 @@ export class MemoryManager {
   }
 
   markConversationBlocked(conversationId: string): void {
+    this.dirty = true;
     this.ensureInitialized();
     this.conversationRepo.markBlocked(conversationId);
   }
@@ -270,6 +284,13 @@ export class MemoryManager {
   isConversationBlocked(conversationId: string): boolean {
     this.ensureInitialized();
     return this.conversationRepo.isBlocked(conversationId);
+  }
+
+  /** Apaga o historico de mensagens mas mantem a linha da conversa e seus arquivos. */
+  clearMessages(conversationId: string): number {
+    this.dirty = true;
+    this.ensureInitialized();
+    return this.messageRepo.deleteByConversationId(conversationId);
   }
 
   truncateOldMessages(conversationId: string): number {

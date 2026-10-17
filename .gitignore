@@ -1,7 +1,11 @@
 # Dados e secrets
 data/
 .env
+.env.bak*
 *.lock
+
+# Saida gerada pelo agente
+output/
 
 # Dependencias
 node_modules/
@@ -14,8 +18,9 @@ tmp/
 *.tmp
 *.bak
 
-# Modelos Whisper (multi-GB)
+# Modelos Whisper (multi-GB) e binarios baixados pelo setup
 models/whisper/*.bin
+bin/
 
 # Logs
 *.log

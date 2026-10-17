@@ -1,16 +1,18 @@
 import type { ILlmProvider, LlmMessage, LlmResponse, TokenUsage } from "./types.js";
-import { withRetry } from "./types.js";
+import { withRetry, toOpenAiTools } from "./types.js";
+import type { ToolDefinition } from "../tools/registry.js";
 
+// Apenas apelidos. Qualquer slug cru do OpenRouter tambem funciona como LLM_PROVIDER - ver `|| this.name` abaixo.
+// A disponibilidade de modelos muda: "groq" e "nemotron-nano" sairam quando o OpenRouter os removeu do catalogo.
 const MODEL_MAP: Record<string, string> = {
   gemini: "google/gemini-2.5-flash",
   deepseek: "deepseek/deepseek-chat",
-  groq: "meta-llama/llama-4-maverick:free",
   nemotron: "nvidia/nemotron-3-ultra-550b-a55b:free",
   "nemotron-super": "nvidia/nemotron-3-super-120b-a12b:free",
-  "nemotron-nano": "nvidia/nemotron-3-nano-30b-a3b:free",
 };
 
 interface OpenRouterResponse {
+  error?: { message?: string; code?: number };
   choices?: {
     message?: {
       content?: string;
@@ -54,9 +56,9 @@ export class OpenRouterProvider implements ILlmProvider {
     console.info(`[OpenRouter] ${this.name} -> ${this.model}`);
   }
 
-  async generate(messages: LlmMessage[]): Promise<LlmResponse> {
+  async generate(messages: LlmMessage[], tools?: ToolDefinition[]): Promise<LlmResponse> {
     return withRetry(
-      () => this._generate(messages),
+      () => this._generate(messages, tools),
       {
         maxRetries: this.retryCount,
         baseDelayMs: this.retryBaseDelayMs,
@@ -65,7 +67,7 @@ export class OpenRouterProvider implements ILlmProvider {
     );
   }
 
-  private async _generate(messages: LlmMessage[]): Promise<LlmResponse> {
+  private async _generate(messages: LlmMessage[], tools?: ToolDefinition[]): Promise<LlmResponse> {
     const body: Record<string, unknown> = {
       model: this.model,
       messages: messages.map((m) => {
@@ -80,6 +82,10 @@ export class OpenRouterProvider implements ILlmProvider {
       temperature: 0.7,
       max_tokens: 8192,
     };
+
+    if (tools && tools.length > 0) {
+      body.tools = toOpenAiTools(tools);
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -98,14 +104,25 @@ export class OpenRouterProvider implements ILlmProvider {
       });
 
       if (!response.ok) {
+        const detail = await response.text().catch(() => "");
         const error: Error & { status?: number } = new Error(
-          `${this.name} API error: ${response.status} ${response.statusText}`
+          `${this.name} API error: ${response.status} ${response.statusText}${detail ? ` - ${detail.slice(0, 200)}` : ""}`
         );
         error.status = response.status;
         throw error;
       }
 
       const data = (await response.json()) as OpenRouterResponse;
+
+      // um 200 ainda pode carregar falha do provedor upstream; lanca para retry/fallback verem
+      if (data.error) {
+        const error: Error & { status?: number } = new Error(
+          `${this.name} API error: ${data.error.code ?? "?"} ${data.error.message ?? "unknown error"}`
+        );
+        error.status = data.error.code;
+        throw error;
+      }
+
       return this.parseResponse(data);
     } finally {
       clearTimeout(timeout);

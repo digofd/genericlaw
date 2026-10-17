@@ -1,4 +1,5 @@
 import { Database } from "sql.js";
+import { v4 as uuidv4 } from "uuid";
 
 export interface Conversation {
   id: string;
@@ -22,7 +23,7 @@ export interface Message {
 }
 
 export interface ConversationRepository {
-  create(userId: string, provider?: string): Conversation;
+  create(userId: string, id?: string): Conversation;
   findById(id: string): Conversation | null;
   findByUserId(userId: string): Conversation[];
   markBlocked(conversationId: string): void;
@@ -42,19 +43,19 @@ export interface MessageRepository {
   findByConversationId(conversationId: string, limit?: number): Message[];
   countByConversationId(conversationId: string): number;
   deleteOldMessages(conversationId: string, keepCount: number): number;
+  deleteByConversationId(conversationId: string): number;
 }
 
 export class SqliteConversationRepository implements ConversationRepository {
   constructor(private db: Database) {}
 
-  create(userId: string, provider = "gemini"): Conversation {
-    const { v4: uuidv4 } = require("uuid") as typeof import("uuid");
-    const id = uuidv4();
+  // o id e o id do chat do Telegram, entao a conversa sobrevive a reinicios; as mensagens referenciam ele.
+  create(userId: string, id: string = uuidv4()): Conversation {
     const now = new Date().toISOString();
 
     this.db.run(
-      "INSERT INTO conversations (id, user_id, title, provider, blocked, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?)",
-      [id, userId, "", provider, now, now]
+      "INSERT INTO conversations (id, user_id, title, blocked, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)",
+      [id, userId, "", now, now]
     );
 
     return this.findById(id)!;
@@ -158,8 +159,9 @@ export class SqliteMessageRepository implements MessageRepository {
 
   findByConversationId(conversationId: string, limit?: number): Message[] {
     const sql = limit
-      ? "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?"
-      : "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC";
+      // por id, nao created_at: escritas de assistant/tool no mesmo milissegundo precisam manter a ordem de insercao
+      ? "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?"
+      : "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id ASC";
 
     const stmt = this.db.prepare(sql);
     stmt.bind(limit ? [conversationId, limit] : [conversationId]);
@@ -187,11 +189,17 @@ export class SqliteMessageRepository implements MessageRepository {
     return count;
   }
 
+  deleteByConversationId(conversationId: string): number {
+    const removed = this.countByConversationId(conversationId);
+    this.db.run("DELETE FROM messages WHERE conversation_id = ?", [conversationId]);
+    return removed;
+  }
+
   deleteOldMessages(conversationId: string, keepCount: number): number {
     const countBefore = this.countByConversationId(conversationId);
 
     this.db.run(
-      "DELETE FROM messages WHERE conversation_id = ? AND id NOT IN (SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?)",
+      "DELETE FROM messages WHERE conversation_id = ? AND id NOT IN (SELECT id FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?)",
       [conversationId, conversationId, keepCount]
     );
 

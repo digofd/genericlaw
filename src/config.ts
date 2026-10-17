@@ -44,8 +44,10 @@ export interface AppConfig {
   audio: {
     whisperBinary: string;
     whisperModel: string;
+    whisperLanguage: string;
     ttsVoiceId: string;
     ffmpegBinary: string;
+    edgeTtsBinary: string;
   };
 }
 
@@ -97,8 +99,8 @@ export function validateConfig(raw: Record<string, string | undefined>): AppConf
   const _llmRetryCount = parseNumber(raw.LLM_RETRY_COUNT, "LLM_RETRY_COUNT", 3, invalidKeys);
   const _llmRetryBaseDelayMs = parseNumber(raw.LLM_RETRY_BASE_DELAY_MS, "LLM_RETRY_BASE_DELAY_MS", 1000, invalidKeys);
   const _toolTimeoutMs = parseNumber(raw.TOOL_TIMEOUT_MS, "TOOL_TIMEOUT_MS", 30000, invalidKeys);
-  parseNumber(raw.MEMORY_WINDOW_SIZE, "MEMORY_WINDOW_SIZE", 20, invalidKeys);
-  parseNumber(raw.DB_MAX_SIZE_MB, "DB_MAX_SIZE_MB", 500, invalidKeys);
+  const _windowSize = parseNumber(raw.MEMORY_WINDOW_SIZE, "MEMORY_WINDOW_SIZE", 20, invalidKeys);
+  const _dbMaxSizeMb = parseNumber(raw.DB_MAX_SIZE_MB, "DB_MAX_SIZE_MB", 500, invalidKeys);
 
   const primaryProvider = raw.LLM_PROVIDER || "gemini";
   const fallbackProviders = parseCsv(raw.LLM_PROVIDERS).filter((p) => p !== primaryProvider);
@@ -146,9 +148,9 @@ export function validateConfig(raw: Record<string, string | undefined>): AppConf
       toolTimeoutMs: _toolTimeoutMs,
     },
     memory: {
-      windowSize: parseNumber(raw.MEMORY_WINDOW_SIZE, "MEMORY_WINDOW_SIZE", 20, invalidKeys),
+      windowSize: _windowSize,
       dbPath: raw.DB_PATH || "./data/db.sqlite",
-      dbMaxSizeMb: parseNumber(raw.DB_MAX_SIZE_MB, "DB_MAX_SIZE_MB", 500, invalidKeys),
+      dbMaxSizeMb: _dbMaxSizeMb,
     },
     filesystem: {
       workspaceRoot: raw.WORKSPACE_ROOT || "./output",
@@ -161,8 +163,10 @@ export function validateConfig(raw: Record<string, string | undefined>): AppConf
     audio: {
       whisperBinary: raw.WHISPER_BINARY || "whisper",
       whisperModel: raw.WHISPER_MODEL || "small",
+      whisperLanguage: raw.WHISPER_LANGUAGE || "pt",
       ttsVoiceId: raw.TTS_VOICE_ID || "pt-BR-ThalitaMultilingualNeural",
       ffmpegBinary: raw.FFMPEG_BINARY || "ffmpeg",
+      edgeTtsBinary: raw.EDGE_TTS_BINARY || "edge-tts",
     },
   };
 

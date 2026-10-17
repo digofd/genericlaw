@@ -1,3 +1,29 @@
+import path from "path";
+
+/**
+ * startsWith() nao e verificacao de contencao: com workspace "./output" ele aceitaria
+ * "../output-evil/x". Comparar o caminho relativo no lugar.
+ */
+export function isInsideWorkspace(workspaceAbs: string, absPath: string): boolean {
+  const rel = path.relative(workspaceAbs, absPath);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/** Resolve um caminho relativo ao workspace, ou null se ele escapar do workspace. */
+export function resolveInWorkspace(workspaceRoot: string, inputPath: string): string | null {
+  const workspaceAbs = path.resolve(process.cwd(), workspaceRoot);
+  const resolved = path.resolve(workspaceAbs, inputPath);
+  return isInsideWorkspace(workspaceAbs, resolved) ? resolved : null;
+}
+
+/** Corta para no maximo maxBytes sem partir um caractere multibyte. */
+export function truncateUtf8(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, "utf-8") <= maxBytes) return text;
+  let out = Buffer.from(text, "utf-8").subarray(0, maxBytes).toString("utf-8");
+  while (Buffer.byteLength(out, "utf-8") > maxBytes) out = out.slice(0, -1);
+  return out;
+}
+
 export interface ToolParameter {
   type: "string" | "number" | "boolean" | "object" | "array";
   description: string;
@@ -91,13 +117,5 @@ export class ToolRegistry {
       throw new Error(`Tool '${name}' not found.`);
     }
     return tool;
-  }
-}
-
-export class ToolFactory {
-  constructor(private registry: ToolRegistry) {}
-
-  create(name: string): ITool {
-    return this.registry.get(name);
   }
 }

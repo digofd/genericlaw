@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { BaseTool } from "./registry.js";
+import { BaseTool, resolveInWorkspace, isInsideWorkspace } from "./registry.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 
 const MAX_DEPTH = 3;
@@ -35,12 +35,11 @@ export class ListarArquivosTool extends BaseTool {
       return { success: false, output: "Erro: use caminho relativo ao workspace.", error: "absolute path" };
     }
 
-    const resolved = path.resolve(process.cwd(), this.workspaceRoot, inputPath);
-    const workspaceAbs = path.resolve(process.cwd(), this.workspaceRoot);
-
-    if (!resolved.startsWith(workspaceAbs)) {
+    const resolved = resolveInWorkspace(this.workspaceRoot, inputPath);
+    if (!resolved) {
       return { success: false, output: "Erro: caminho fora do workspace permitido.", error: "path traversal" };
     }
+    const workspaceAbs = path.resolve(process.cwd(), this.workspaceRoot);
 
     if (!fs.existsSync(resolved)) {
       return { success: false, output: `Erro: diretório não encontrado: ${inputPath}.`, error: "not found" };
@@ -68,7 +67,7 @@ export class ListarArquivosTool extends BaseTool {
     depth: number
   ): string[] {
     if (depth > MAX_DEPTH) return ["  (mais arquivos...)"];
-    if (!dirPath.startsWith(workspaceAbs)) return [];
+    if (!isInsideWorkspace(workspaceAbs, dirPath)) return [];
 
     const lines: string[] = [];
     let entries: fs.Dirent[];

@@ -2,11 +2,11 @@
 
 ---
 
-## 1. Visão Geral
+## 1. Visao Geral
 
-O **GeneriClaw** é um agente pessoal de Inteligência Artificial projetado para operar localmente no desktop do usuário. Sua interface primária de controle é o Telegram, permitindo uma interação fluida via texto, documentos e voz. O sistema é construído para ser modular, extensível através de "skills" (habilidades) e totalmente focado na privacidade, mantendo a persistência de dados localmente.
+O **GeneriClaw** e um agente pessoal de Inteligencia Artificial projetado para operar localmente no desktop do usuario. Sua interface primaria de controle e o Telegram, permitindo uma interacao fluida via texto, documentos e voz. O sistema e construido para ser modular, extensivel atraves de "skills" (habilidades) e totalmente focado na privacidade, mantendo a persistencia de dados localmente.
 
-A arquitetura segue um fluxo de pipeline onde as mensagens do Telegram são capturadas, processadas por um motor de raciocínio (Agent Loop) que utiliza LLMs externos (como Gemini ou DeepSeek) apenas para inferência, e responde de volta ao usuário de forma inteligente, podendo inclusive gerar arquivos ou respostas em áudio.
+A arquitetura segue um fluxo de pipeline onde as mensagens do Telegram sao capturadas, processadas por um motor de raciocinio (Agent Loop) que utiliza LLMs externos (como Gemini ou DeepSeek) apenas para inferencia, e responde de volta ao usuario de forma inteligente, podendo inclusive gerar arquivos ou respostas em audio.
 
 ---
 
@@ -14,25 +14,25 @@ A arquitetura segue um fluxo de pipeline onde as mensagens do Telegram são capt
 
 | Requisito | Tipo | Prioridade | Notas |
 |-----------|------|------------|-------|
-| Operação Local | Não-funcional | Crítica | O "core" deve rodar no host local (Windows). |
+| Operacao Local | Nao-funcional | Critica | O "core" deve rodar no host local (Windows). |
 | Interface Telegram | Funcional | Alta | Uso da biblioteca `grammy` para polling. |
-| Persistência Local | Funcional | Alta | Armazenamento de conversas em SQLite. |
-| Padronização de LLMs | Não-funcional | Alta | Troca dinâmica de provedores (Gemini, DeepSeek, Groq). |
-| Multimodalidade (Input) | Funcional | Média | Suporte a PDF e Voz (STT via Whisper Local). |
-| Multimodalidade (Output)| Funcional | Média | Suporte a Arquivos (.md) e Voz (TTS). |
-| Segurança de Acesso | Funcional | Crítica | Whitelist estrita baseada em ID de usuário do Telegram. |
+| Persistencia Local | Funcional | Alta | Armazenamento de conversas em SQLite. |
+| Padronizacao de LLMs | Nao-funcional | Alta | Troca dinamica de provedores (Gemini, DeepSeek, Groq). |
+| Multimodalidade (Input) | Funcional | Media | Suporte a PDF e Voz (STT via Whisper Local). |
+| Multimodalidade (Output)| Funcional | Media | Suporte a Arquivos (.md) e Voz (TTS). |
+| Seguranca de Acesso | Funcional | Critica | Whitelist estrita baseada em ID de usuario do Telegram. |
 
 ---
 
 ## 3. Estilo Arquitetural
 
 O sistema adota um estilo **Monolito Modular com Sistema de Plugins**.  
-- **Monolito Modular:** Facilita o desenvolvimento e deploy local sem a complexidade de microsserviços.
-- **Plugin-based (Skills):** Permite que novas funcionalidades sejam adicionadas ou atualizadas via "Hot-Reload" apenas manipulando diretórios na pasta `agents/skills`, sem reiniciar o processo principal.
+- **Monolito Modular:** Facilita o desenvolvimento e deploy local sem a complexidade de microsservicos.
+- **Plugin-based (Skills):** Permite que novas funcionalidades sejam adicionadas ou atualizadas via "Hot-Reload" apenas manipulando diretorios na pasta `agents/skills`, sem reiniciar o processo principal.
 
 **Trade-offs:**  
-- **Vantagem:** Baixa latência interna, facilidade de manutenção para um único desenvolvedor, alta coesão.
-- **Desvantagem:** Escalabilidade vertical limitada ao hardware do host local (não é um problema para o caso de uso de agente pessoal).
+- **Vantagem:** Baixa latencia interna, facilidade de manutencao para um unico desenvolvedor, alta coesao.
+- **Desvantagem:** Escalabilidade vertical limitada ao hardware do host local (nao e um problema para o caso de uso de agente pessoal).
 
 ---
 
@@ -40,25 +40,25 @@ O sistema adota um estilo **Monolito Modular com Sistema de Plugins**.
 
 ```mermaid
 graph TB
-    User([👤 Usuário Generic])
-    Telegram[📱 Telegram Client]
-    System[🏗️ GeneriClaw Engine]
-    LLM[🧠 LLM APIs - Gemini/DeepSeek]
-    Whisper[🎙️ Whisper Local - STT]
-    EdgeTTS[🔊 Edge-TTS - TTS]
+    User([ Usuario Generic])
+    Telegram[ Telegram Client]
+    System[\ufe0f GeneriClaw Engine]
+    LLM[ LLM APIs - Gemini/DeepSeek]
+    Whisper[\ufe0f Whisper Local - STT]
+    EdgeTTS[ Edge-TTS - TTS]
 
     User <-->|Envia Msg/Voz/Doc| Telegram
     Telegram <-->|Polling/Reply| System
     System <-->|Prompt/Response| LLM
-    System -->|Processa Áudio| Whisper
-    System -->|Gera Áudio| EdgeTTS
+    System -->|Processa Audio| Whisper
+    System -->|Gera Audio| EdgeTTS
 ```
 
 ---
 
 ## 5. Diagrama de Componentes e Camadas
 
-O projeto segue estritamente a **Programação Orientada a Objetos (POO)** com separação clara de responsabilidades em arquivos e módulos distintos.
+O projeto segue estritamente a **Programacao Orientada a Objetos (POO)** com separacao clara de responsabilidades em arquivos e modulos distintos.
 
 ```mermaid
 graph TB
@@ -78,14 +78,14 @@ graph TB
         SkillR[SkillRouter]
     end
 
-    subgraph "Camada de Persistência (Memory)"
+    subgraph "Camada de Persistencia (Memory)"
         MemM[MemoryManager - Facade]
         ConvR[ConversationRepository]
         MsgR[MessageRepository]
         DB[(SQLite - db.sqlite)]
     end
 
-    subgraph "Camada de Áudio (STT/TTS)"
+    subgraph "Camada de Audio (STT/TTS)"
         WhisperProc[Whisper Local - STT]
         EdgeTTSProc[Edge-TTS - AudioOutputStrategy]
     end
@@ -109,21 +109,21 @@ graph TB
 
 ---
 
-## 6. Decisões de Tecnologia (Source of Truth)
+## 6. Decisoes de Tecnologia (Source of Truth)
 
-Este tópico centraliza as definições de stack. **Alterações aqui devem refletir mudanças em toda a arquitetura do sistema.**
+Este topico centraliza as definicoes de stack. **Alteracoes aqui devem refletir mudancas em toda a arquitetura do sistema.**
 
 | Componente | Tecnologia | Detalhes / Justificativa |
 |------------|------------|-------------------------|
-| **Linguagem** | **Node.js (TypeScript)** | Ambiente rátido para IO, ecossistema rico e familiaridade. |
-| **Paradigma** | **Orientação a Objetos** | Uso obrigatório de Classes, Interfaces e Padrões de Projeto (User Rule). |
-| **Banco de Dados**| **SQLite** | Local, serverless, rápido (`better-sqlite3`). |
-| **Interface Bot** | **grammy** | Framework moderno e performático para Telegram Bot API. |
-| **Raciocínio IA** | **ReAct Pattern** | Loop de "Thought -> Action -> Observation -> Answer". |
-| **STT (Voz)** | **Whisper (Local)** | Transcrição privada sem custo de API. Binário `whisper` CLI invocado via `child_process.execFile`. Modelos multi-GB rodam em processo separado para não bloquear o event loop do Node. |
-| **Conversão Áudio** | **ffmpeg (Obrigatório)** | Converte OGG/OPUS do Telegram para WAV mono 16kHz antes do Whisper. Verificado na inicialização. Se ausente, entrada de voz é desabilitada. |
-| **TTS (Fala)** | **Edge-TTS** | Geração de voz de alta qualidade (`pt-BR-Thalita`). |
-| **Parser Documentos**| **pdf-parse** | Extração de texto de PDFs para processamento pela IA. |
+| **Linguagem** | **Node.js (TypeScript)** | Ambiente ratido para IO, ecossistema rico e familiaridade. |
+| **Paradigma** | **Orientacao a Objetos** | Uso obrigatorio de Classes, Interfaces e Padroes de Projeto (User Rule). |
+| **Banco de Dados**| **SQLite** | Local, serverless, sem dependencia nativa (`sql.js`, wasm). |
+| **Interface Bot** | **grammy** | Framework moderno e performatico para Telegram Bot API. |
+| **Raciocinio IA** | **ReAct Pattern** | Loop de "Thought -> Action -> Observation -> Answer". |
+| **STT (Voz)** | **Whisper (Local)** | Transcricao privada sem custo de API. Binario `whisper` CLI invocado via `child_process.execFile`. Modelos multi-GB rodam em processo separado para nao bloquear o event loop do Node. |
+| **Conversao Audio** | **ffmpeg (Obrigatorio)** | Converte OGG/OPUS do Telegram para WAV mono 16kHz antes do Whisper. Verificado na inicializacao. Se ausente, entrada de voz e desabilitada. |
+| **TTS (Fala)** | **Edge-TTS** | Geracao de voz de alta qualidade (`pt-BR-Thalita`). |
+| **Parser Documentos**| **pdf-parse** | Extracao de texto de PDFs para processamento pela IA. |
 
 ### Ciclo de Vida do Modelo Whisper
 
@@ -157,24 +157,24 @@ O timeout de 60s definido em telegram-input.md EC-02 e suficiente para audios de
 
 ## 7. Design Patterns Utilizados
 
-Para manter a alta coesão e baixo acoplamento, os seguintes padrões são aplicados:
+Para manter a alta coesao e baixo acoplamento, os seguintes padroes sao aplicados:
 
 1.  **Facade:** Utilizado no `AgentController` e `MemoryManager` para simplificar a interface com subsistemas complexos.
-2.  **Factory:** `ProviderFactory` para instanciar diferentes provedores de LLM e `ToolFactory` para as ferramentas.
+2.  **Factory:** `ProviderFactory` para instanciar diferentes provedores de LLM. As ferramentas sao resolvidas diretamente pelo `ToolRegistry.get()`, sem fabrica separada.
 3.  **Repository:** Para abstrair o acesso ao banco de dados SQLite (`ConversationRepository`, `MessageRepository`).
-4.  **Singleton:** Garantir instância única da conexão com o banco de dados.
+4.  **Singleton:** Garantir instancia unica da conexao com o banco de dados.
 5.  **Strategy:** No `TelegramOutputHandler` para decidir entre enviar texto puro, chunks ou arquivos.
-6.  **Registry:** No sistema de Skills e Tools para registro dinâmico de capacidades.
+6.  **Registry:** No sistema de Skills e Tools para registro dinamico de capacidades.
 7.  **Observer (EventEmitter):** No fluxo `userBlocked` entre `TelegramOutputHandler` e `AgentController`. O OutputHandler emite o evento quando detecta erro 403 "Forbidden" (usuario bloqueou o bot), e o AgentController escuta para chamar `MemoryManager.markConversationBlocked()`. Ver telegram-output.md EC-03 e agent-controller.md 6.2 step 14.
 
 ---
 
-## 8. Fluxos Críticos (Sequence Diagram)
+## 8. Fluxos Criticos (Sequence Diagram)
 
 ### Fluxo de Processamento de Mensagem
 ```mermaid
 sequenceDiagram
-    participant U as Usuário (Telegram)
+    participant U as Usuario (Telegram)
     participant I as TelegramInputHandler
     participant C as AgentController
     participant S as SkillSystem
@@ -185,11 +185,11 @@ sequenceDiagram
     U->>I: Envia Mensagem
     I->>I: Valida Whitelist
     I->>C: Repassa Input Processado
-    C->>S: Router (Identifica Skill necessária)
+    C->>S: Router (Identifica Skill necessaria)
     S-->>C: Retorna Prompt da Skill
-    C->>L: Inicia Ciclo de Raciocínio
-    loop ReAct Loop (até 5x)
-        L->>LLM: Solicita Inferência
+    C->>L: Inicia Ciclo de Raciocinio
+    loop ReAct Loop (ate 5x)
+        L->>LLM: Solicita Inferencia
         LLM-->>L: Retorna Thought / Tool Call
         L->>L: Executa Tool (se houver)
     end
@@ -202,44 +202,44 @@ sequenceDiagram
 
 ## 9. Infraestrutura e Deploy
 
-- **Ambiente:** Execução direta no Windows via Terminal.
+- **Ambiente:** Execucao direta no Windows via Terminal.
 - **Process Management:** `npm run dev` (utilizando nodemon para hot-reload do core).
-- **Diretórios de Dados:**
+- **Diretorios de Dados:**
     - `./data/`: Banco de dados SQLite (`.db`).
-    - `./tmp/`: Arquivos temporários (PDFs/Áudios) deletados após uso.
+    - `./tmp/`: Arquivos temporarios (PDFs/Audios) deletados apos uso.
     - `agents/skills/`: Plugins de habilidades em Markdown.
 
 ---
 
 ## 10. Logging e Observabilidade
 
-**Níveis de log:**
-| Nível | Uso | Exemplo |
+**Niveis de log:**
+| Nivel | Uso | Exemplo |
 |-------|-----|---------|
 | ERROR | Falhas que interrompem o pipeline (provider offline, DB corrompido). | `[AgentLoop] Provider failed: ECONNREFUSED` |
-| WARN | Degradações não críticas (tool não encontrada, skill sem frontmatter, rate limit). | `[SkillLoader] Skill 'xyz' has no YAML frontmatter, skipping` |
-| INFO | Transições de etapa no pipeline (início/fim de handle, skill selecionada, iteração concluída). | `[AgentController] input -> skill -> agent -> memory -> output` |
-| DEBUG | Conteúdo de mensagens, tool arguments, respostas do LLM. | `[AgentLoop] Tool call: criar_arquivo { path: "output/prd.md" }` |
+| WARN | Degradacoes nao criticas (tool nao encontrada, skill sem frontmatter, rate limit). | `[SkillLoader] Skill 'xyz' has no YAML frontmatter, skipping` |
+| INFO | Transicoes de etapa no pipeline (inicio/fim de handle, skill selecionada, iteracao concluida). | `[AgentController] input -> skill -> agent -> memory -> output` |
+| DEBUG | Conteudo de mensagens, tool arguments, respostas do LLM. | `[AgentLoop] Tool call: criar_arquivo { path: "output/prd.md" }` |
 
-**Formato:** `[Módulo] Mensagem`. Sem timestamp explícito — o terminal adiciona via configuração do runtime.
+**Formato:** `[Modulo] Mensagem`. Sem timestamp explicito - o terminal adiciona via configuracao do runtime.
 
 **Destino:** `stdout` (console). Sem arquivo de log no MVP.
 
-**Flag de controle:** `LOG_MESSAGE_CONTENT=false` (padrão). Quando `true`, mensagens de nível DEBUG são liberadas. O padrão é `false` para evitar expor conteúdo de conversas em logs visíveis em produção. Desenvolvedores devem optar ativamente por `true` quando precisarem de logs detalhados.
+**Flag de controle:** `LOG_MESSAGE_CONTENT=false` (padrao). Quando `true`, mensagens de nivel DEBUG sao liberadas. O padrao e `false` para evitar expor conteudo de conversas em logs visiveis em producao. Desenvolvedores devem optar ativamente por `true` quando precisarem de logs detalhados.
 
 
-## 11. Riscos e Mitigações
+## 11. Riscos e Mitigacoes
 
-| Risco | Impacto | Mitigação |
+| Risco | Impacto | Mitigacao |
 |-------|---------|-----------|
-| Corrupção do SQLite | Alto | Uso de WAL (Write-Ahead Logging) e backups locais periódicos. |
-| Falha na API de LLM | Alto | Implementação de `fallback` no `ProviderFactory`. |
-| Vazamento de Memória (Node) | Médio | Gerenciamento estrito de Buffer de áudio e exclusão de arquivos TMP. |
-| Estouro de Contexto IA | Médio | Truncamento nativo no `MemoryManager` via `MEMORY_WINDOW_SIZE`. |
+| Corrupcao do SQLite | Alto | Uso de WAL (Write-Ahead Logging) e backups locais periodicos. |
+| Falha na API de LLM | Alto | Implementacao de `fallback` no `ProviderFactory`. |
+| Vazamento de Memoria (Node) | Medio | Gerenciamento estrito de Buffer de audio e exclusao de arquivos TMP. |
+| Estouro de Contexto IA | Medio | Truncamento nativo no `MemoryManager` via `MEMORY_WINDOW_SIZE`. |
 
 ---
 
-## 12. Estrutura de Diretórios
+## 12. Estrutura de Diretorios
 
 ```
 genericlaw/
@@ -251,28 +251,28 @@ genericlaw/
     memory/         # MemoryManager, ConversationRepository, MessageRepository
     providers/      # ILlmProvider, ProviderFactory, GeminiProvider, DeepSeekProvider
     skills/         # SkillLoader, SkillRouter
-    tools/          # ITool, ToolRegistry, ToolFactory, BaseTool, implementacoes
+    tools/          # ITool, ToolRegistry, BaseTool, helpers de path, implementacoes
   agents/
     skills/         # Plugins de habilidades (hot-reload, .md)
   data/             # SQLite .db (gitignored)
-  tmp/              # Arquivos temporários (pdf, áudio)
+  tmp/              # Arquivos temporarios (pdf, audio)
   tests/
     unit/
     integration/
     mocks/         # MockLlmProvider, MockMemoryManager, MockGrammyContext
-  specs/            # Documentação de especificação
+  specs/            # Documentacao de especificacao
 ```
 
-**Estratégia de Testes:** A estratégia completa de testes e os contratos dos mocks estão definidos em `PRD.md` seção 13. Todos os módulos devem ser testados com os mocks ali especificados. Os mocks estão centralizados em `tests/mocks/` para reuso entre testes unitários e de integração.
+**Estrategia de Testes:** A estrategia completa de testes e os contratos dos mocks estao definidos em `PRD.md` secao 13. Todos os modulos devem ser testados com os mocks ali especificados. Os mocks estao centralizados em `tests/mocks/` para reuso entre testes unitarios e de integracao.
 
 ---
 
-## Gaps de Documentação (Observações)
+## Gaps de Documentacao (Observacoes)
 
-Os seguintes elementos foram inferidos ou precisam de definição futura conforme o amadurecimento do código:
+Os seguintes elementos foram inferidos ou precisam de definicao futura conforme o amadurecimento do codigo:
 
-| Elemento | Status | Recomendação |
+| Elemento | Status | Recomendacao |
 |----------|--------|--------------|
-| Migrations de BD | Documentado | memory.md Seção 9 define estratégia MVP: recriar se schema inválido. Migrações incrementais na versão 2. |
+| Migrations de BD | Documentado | memory.md Secao 9 define estrategia MVP: recriar se schema invalido. Migracoes incrementais na versao 2. |
 | Rate Limiting Telegram | Confirmado | telegram-output.md EC-01 define retry com `Retry-After` header e sleep no OutputHandler ao receber erro 429. |
-| Versão do Node.js | Inferido | Recomenda-se LTS (v20+) para estabilidade das bibliotecas nativas de FS. |
+| Versao do Node.js | Inferido | Recomenda-se LTS (v20+) para estabilidade das bibliotecas nativas de FS. |

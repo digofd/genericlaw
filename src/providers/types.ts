@@ -1,3 +1,5 @@
+import type { ToolDefinition } from "../tools/registry.js";
+
 export interface LlmMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
@@ -26,7 +28,12 @@ export interface LlmResponse {
 
 export interface ILlmProvider {
   readonly name: string;
-  generate(messages: LlmMessage[]): Promise<LlmResponse>;
+  generate(messages: LlmMessage[], tools?: ToolDefinition[]): Promise<LlmResponse>;
+}
+
+/** ToolDefinition ja tem o formato `function` da OpenAI, entao isto e so o involucro. */
+export function toOpenAiTools(tools: ToolDefinition[]): Record<string, unknown>[] {
+  return tools.map((t) => ({ type: "function", function: t }));
 }
 
 export async function withRetry<T>(

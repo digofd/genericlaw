@@ -1,5 +1,6 @@
 import type { ILlmProvider, LlmMessage, LlmResponse, TokenUsage } from "./types.js";
 import { withRetry } from "./types.js";
+import type { ToolDefinition, ToolParameter } from "../tools/registry.js";
 
 interface GeminiContent {
   role: string;
@@ -45,9 +46,9 @@ export class GeminiProvider implements ILlmProvider {
     this.baseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent`;
   }
 
-  async generate(messages: LlmMessage[]): Promise<LlmResponse> {
+  async generate(messages: LlmMessage[], tools?: ToolDefinition[]): Promise<LlmResponse> {
     return withRetry(
-      () => this._generate(messages),
+      () => this._generate(messages, tools),
       {
         maxRetries: this.retryCount,
         baseDelayMs: this.retryBaseDelayMs,
@@ -56,9 +57,9 @@ export class GeminiProvider implements ILlmProvider {
     );
   }
 
-  private async _generate(messages: LlmMessage[]): Promise<LlmResponse> {
+  private async _generate(messages: LlmMessage[], tools?: ToolDefinition[]): Promise<LlmResponse> {
     const contents = this.formatMessages(messages);
-    const toolDeclarations = this.extractToolDeclarations(messages);
+    const toolDeclarations = tools && tools.length > 0 ? this.toGeminiDeclarations(tools) : [];
 
     const body: Record<string, unknown> = {
       contents,
@@ -128,8 +129,37 @@ export class GeminiProvider implements ILlmProvider {
     return contents;
   }
 
-  private extractToolDeclarations(_messages: LlmMessage[]): Record<string, unknown>[] {
-    return [];
+  // O Gemini quer o enum de tipo em maiusculas, e `required` apenas como array no objeto -
+  // nunca o booleano por propriedade que nosso ToolParameter carrega.
+  private toGeminiSchema(p: ToolParameter): Record<string, unknown> {
+    const schema: Record<string, unknown> = {
+      type: p.type.toUpperCase(),
+      description: p.description,
+    };
+    if (p.enum) schema.enum = p.enum;
+    if (p.items) schema.items = this.toGeminiSchema(p.items);
+    if (p.properties) {
+      schema.properties = Object.fromEntries(
+        Object.entries(p.properties).map(([k, v]) => [k, this.toGeminiSchema(v)])
+      );
+      const nested = Object.entries(p.properties).filter(([, v]) => v.required).map(([k]) => k);
+      if (nested.length > 0) schema.required = nested;
+    }
+    return schema;
+  }
+
+  private toGeminiDeclarations(tools: ToolDefinition[]): Record<string, unknown>[] {
+    return tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: {
+        type: "OBJECT",
+        properties: Object.fromEntries(
+          Object.entries(t.parameters.properties).map(([k, v]) => [k, this.toGeminiSchema(v)])
+        ),
+        required: t.parameters.required,
+      },
+    }));
   }
 
   private parseResponse(data: GeminiResponse): LlmResponse {
