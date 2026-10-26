@@ -124,6 +124,11 @@ Este topico centraliza as definicoes de stack. **Alteracoes aqui devem refletir 
 | **Conversao Audio** | **ffmpeg (Obrigatorio)** | Converte OGG/OPUS do Telegram para WAV mono 16kHz antes do Whisper. Verificado na inicializacao. Se ausente, entrada de voz e desabilitada. |
 | **TTS (Fala)** | **Edge-TTS** | Geracao de voz de alta qualidade (`pt-BR-Thalita`). |
 | **Parser Documentos**| **pdf-parse** | Extracao de texto de PDFs para processamento pela IA. |
+| **Testes** | **vitest** | Unica dependencia de teste. Mock de rede via `vi.stubGlobal("fetch", ...)`. |
+
+**Dependencias de producao, na integra:** `grammy`, `sql.js`, `pdf-parse`, `dotenv`. Mais nada.
+Identificadores unicos usam `crypto.randomUUID()` do proprio Node - o pacote `uuid` foi removido por
+ser duas chamadas que a plataforma ja oferece.
 
 ### Ciclo de Vida do Modelo Whisper
 
@@ -244,26 +249,30 @@ sequenceDiagram
 ```
 genericlaw/
   src/
-    config.ts       # Configuracao centralizada (AppConfig, validateConfig)
+    main.ts         # bootstrap: valida config e providers, monta o grafo, trata shutdown
+    config.ts       # AppConfig, validateConfig, ConfigError (sem singleton global)
     core/           # AgentController, AgentLoop
-    input/          # TelegramInputHandler
-    output/         # TelegramOutputHandler, OutputStrategies
-    memory/         # MemoryManager, ConversationRepository, MessageRepository
-    providers/      # ILlmProvider, ProviderFactory, GeminiProvider, DeepSeekProvider
+    input/          # TelegramInputHandler, WhisperProcessor
+    output/         # TelegramOutputHandler, OutputStrategies, EdgeTTSProcessor
+    memory/         # MemoryManager, SqliteConversationRepository, SqliteMessageRepository
+    providers/      # ILlmProvider, ProviderFactory, GeminiProvider, OpenAiCompatProvider
     skills/         # SkillLoader, SkillRouter
     tools/          # ITool, ToolRegistry, BaseTool, helpers de path, implementacoes
+    scripts/        # setup-whisper.ts (baixa binario e modelo)
   agents/
-    skills/         # Plugins de habilidades (hot-reload, .md)
+    skills/         # Plugins de habilidades (.md, relidos a cada mensagem)
   data/             # SQLite .db (gitignored)
-  tmp/              # Arquivos temporarios (pdf, audio)
-  tests/
-    unit/
-    integration/
-    mocks/         # MockLlmProvider, MockMemoryManager, MockGrammyContext
+  output/           # WORKSPACE_ROOT: arquivos criados pelo agente (gitignored)
+  tmp/              # Arquivos temporarios (pdf, audio) - esvaziados no finally de cada handler
+  tests/            # suite plana, um arquivo por comportamento (ver PRD.md 13)
   specs/            # Documentacao de especificacao
 ```
 
-**Estrategia de Testes:** A estrategia completa de testes e os contratos dos mocks estao definidos em `PRD.md` secao 13. Todos os modulos devem ser testados com os mocks ali especificados. Os mocks estao centralizados em `tests/mocks/` para reuso entre testes unitarios e de integracao.
+**Estrategia de Testes:** definida em `PRD.md` secao 13. A suite e **plana** - sem
+`unit/`/`integration/`/`mocks/`. Cada arquivo cobre um comportamento e carrega seus proprios dublês
+locais (`ScriptedProvider`, `FakeContext`, `FakeTts`, `fakeBot`), porque um diretorio de mocks
+compartilhados acopla testes que deveriam poder divergir. A regra que orienta todos eles: **o teste
+le o destino**, nao o objeto que a funcao devolve.
 
 ---
 

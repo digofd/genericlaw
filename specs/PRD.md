@@ -156,19 +156,53 @@ Suite atual (`npx vitest run`), organizada por comportamento e nao por classe:
 
 ```
 tests/
-  agent-loop.test.ts        # deduplicacao de tool calls, soma de tokens,
-                            # teto e paginacao de ler_arquivo (ScriptedProvider local)
-  memory.test.ts            # id da conversa, ordenacao, truncamento, /novo,
-                            # persistencia de schema e de dados no shutdown
-  config.test.ts            # chaves ausentes/invalidas, defaults, regras de provider
-  skill-loader.test.ts      # frontmatter, defaults, regras de skip, dedupe, reload
-  workspace-path.test.ts    # contencao de path, overwrite, validateArgs
-  upload-path.test.ts       # nome seguro de upload, contencao contra file_name hostil
+  agent-loop.test.ts            # deduplicacao de tool calls, soma de tokens,
+                                # teto e paginacao de ler_arquivo (ScriptedProvider local)
+  provider-request-body.test.ts # o corpo JSON que sai para cada provider: par tool_calls/tool
+  log-privacy.test.ts           # LOG_MESSAGE_CONTENT desligado nao deixa conteudo no log
+  memory.test.ts                # id da conversa, ordenacao, truncamento, /novo,
+                                # persistencia de schema e de dados no shutdown
+  memory-window.test.ts         # janela, limite zero, minimos de config, tamanho do banco
+  config.test.ts                # chaves ausentes/invalidas, defaults, regras de provider
+  bootstrap-providers.test.ts   # boot real: provider inutilizavel mata o processo; diretorios
+  controller-queue.test.ts      # fila por conversa, timers cancelados, registro de delivered
+  skill-loader.test.ts          # frontmatter, defaults, regras de skip, dedupe, reload
+  workspace-path.test.ts        # contencao de path, overwrite, validateArgs
+  upload-path.test.ts           # nome seguro de upload, contencao contra file_name hostil
+  upload-collision.test.ts      # dois envios de mesmo nome, corrida no diretorio temporario
+  audio-request.test.ts         # deteccao de pedido de audio no texto
+  audio-output.test.ts          # fallback de TTS, chunking, InputFile, valor de Delivered
 ```
 
-Providers de rede e handlers do Telegram **nao** tem testes unitarios: exigiriam mock de HTTP e de
-`Context` do grammy para pouco retorno. A cobertura desses caminhos vem de execucao real contra o
-bot.
+### O teste le o destino, nao a origem
+
+Uma peca que **roda** nao e uma peca que **entrega**. Testes que exercitam a funcao e inspecionam o
+objeto que ela devolve passam exatamente nos defeitos em que a saida nunca chega ao consumidor.
+Antes de cada teste, escreva onde o consumidor le a saida, e verifique **la**:
+
+| Peca | Destino que o teste le |
+|---|---|
+| Providers | o corpo JSON passado ao `fetch` |
+| Estrategias de saida | o texto/arquivo que chegaria em `ctx.reply`/`replyWithVoice` |
+| Handler de documento | os arquivos no `WORKSPACE_ROOT` |
+| Bootstrap | o stderr e o exit code de `npx tsx src/main.ts` de verdade |
+| Log de privacidade | o que `console.*` recebeu |
+| Fila do controller | timers pendentes e o `metadata` gravado |
+
+**Marcador plantado, com controle.** Faca uma string unica percorrer o caminho real e procure-a no
+destino. Se nao achar, descubra antes de concluir se a peca nao entrega ou se a **busca** esta
+quebrada - plante um segundo marcador num campo que comprovadamente chega. Sem esse controle,
+"nao achei" nao e prova de nada.
+
+Isso nao e teoria: o marcador de controle ja derrubou duas conclusoes erradas nesta suite. Uma
+investigacao sobre `MEMORY_WINDOW_SIZE=0` apontava "manda o historico inteiro ao LLM"; o teste
+passou de primeira, e o efeito real era o oposto e pior - o historico era **apagado** a cada
+mensagem. E o primeiro teste da fila do controller usava `shutdown()` para esperar, sem notar que
+ele descarta as respostas em voo.
+
+**O que ainda nao tem teste:** o caminho de voz de ponta a ponta (whisper e edge-tts sao binarios
+externos) e o Gemini contra a API real. A verificacao desses vem de execucao real contra o bot,
+lendo o `metadata` da mensagem no banco - `delivered: "voice"` prova que o audio saiu.
 
 ### Testes de regressao devem falhar contra o bug
 

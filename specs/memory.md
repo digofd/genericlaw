@@ -58,12 +58,10 @@ A adocao do SQLite e veloz, serverless (um arquivo fisico unico), suporta chamad
 **ConversationRepository:**
 ```typescript
 interface ConversationRepository {
-  create(userId: string, provider?: string): Conversation;
+  create(userId: string, id?: string): Conversation;   // id = chat id do Telegram
   findById(id: string): Conversation | null;
-  findByUserId(userId: string): Conversation[];
   markBlocked(conversationId: string): void;
   isBlocked(conversationId: string): boolean;
-  updateTitle(conversationId: string, title: string): void;
 }
 ```
 
@@ -86,7 +84,7 @@ interface MessageRepository {
 | ID | Requisito | Prioridade | Criterio de Aceite |
 |----|-----------|-----------|-------------------|
 | RF-01 | O Singleton de DB deve criar a tabela de historico (`conversations` e `messages`) sozinho no startup se nao existirem. | Must | Excluir db antigo; reiniciar app; arquivo data/ db.sqlite reaparece limpo. |
-| RF-02 | O Storage deve usar WAL (Write-Ahead Logging) ativo pra manter leitura sem block | Must | Multiplas msgs via Telegram nao congelam o bot por locks do sqlite3 nativo. |
+| RF-02 | ~~O Storage deve usar WAL~~ | Descartado | Nao se aplica ao `sql.js`: o banco vive em memoria e nao ha locks de arquivo a evitar. Ver secao 9. |
 | RF-03 | A classe abstrata repassara ao Agent Loop somente o numero `MEMORY_WINDOW_SIZE` de mensagens recentes. | Must | Uma chamada REST pro Gemini nao falhara por estouro de token via historico inchado (1M text words). |
 
 ### 6.2 Fluxo Principal (Happy Path)
@@ -108,7 +106,7 @@ Falhas de Banco - Vide [11. Edge Cases e Tratamento de Erros](#11-edge-cases-e-t
 
 | ID | Requisito | Valor alvo | Observacao |
 |----|-----------|-----------|------------|
-| RNF-01 | Transacoes Seguras | Auto-commit nativo | WAL ativo resolve concorrencia Single thread node. |
+| RNF-01 | Transacoes Seguras | Auto-commit nativo | O Node e single-thread e o `AgentController` ja serializa por conversa; nao ha escrita concorrente a coordenar. |
 | RNF-02 | Tempo de insercao | < 10ms | API sincrona do `sql.js` (em memoria). |
 | RNF-03 | Tempo de consulta de historico | < 5ms | LIMIT query simples. |
 | RNF-04 | Tamanho maximo por mensagem | 65536 bytes | Truncamento aplicado antes da insercao. |
@@ -129,15 +127,15 @@ Schema SQLite completo. Criado automaticamente na inicializacao pelo Singleton d
 CREATE TABLE IF NOT EXISTS conversations (
   id            TEXT PRIMARY KEY,
   user_id       TEXT NOT NULL,
-  title         TEXT DEFAULT '',
-  provider      TEXT NOT NULL DEFAULT 'gemini',
+  title         TEXT DEFAULT '',                      -- legado: nunca lido nem escrito
+  provider      TEXT NOT NULL DEFAULT 'gemini',       -- legado: nunca lido nem escrito
   blocked       INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+DROP INDEX IF EXISTS idx_conversations_user_id;       -- nenhuma consulta busca por usuario
 
 CREATE TABLE IF NOT EXISTS messages (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,6 +156,17 @@ Pragma de inicializacao: `PRAGMA foreign_keys=ON; PRAGMA auto_vacuum=INCREMENTAL
 
 `journal_mode=WAL` **nao** e usado: o backend e `sql.js`, um build wasm que opera inteiramente em
 memoria e persiste via export/escrita do arquivo inteiro. WAL e inocuo nesse modelo.
+
+**Colunas legado.** `title` e `provider` nao tem leitor nem escritor desde que
+`updateConversationTitle()` e `getConversationsByUser()` foram removidos. Ficam no `CREATE TABLE`
+de proposito: `CREATE TABLE IF NOT EXISTS` nao altera bancos ja existentes, entao tira-las do DDL
+criaria dois formatos de schema em circulacao - bancos novos sem as colunas, antigos com - sem
+nenhum ganho. O `INSERT` de `create()` ja nao as menciona, e `Conversation` nao as expoe.
+
+**Indices sao removidos com `DROP INDEX IF EXISTS` explicito.** Apagar a linha `CREATE INDEX` nao
+basta: um banco ja existente mantem o indice para sempre, e cada escrita continua pagando por ele.
+Pelo mesmo motivo, **redefinir** um indice exige nome novo - `CREATE INDEX IF NOT EXISTS` encontra
+o antigo e mantem silenciosamente a definicao velha.
 
 **Indice alinhado a ordenacao:** todas as consultas de mensagem ordenam por `id` (ver politica de
 retencao abaixo), entao o indice cobre `(conversation_id, id)`. Um indice sobre `created_at` obriga

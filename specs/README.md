@@ -2,6 +2,16 @@
 
 Documentacao de especificacao do sistema GeneriClaw. Cada arquivo define o contrato, interface, edge cases e dependencias de um modulo.
 
+**Estas specs descrevem o codigo como ele e**, nao como foi planejado. Quando um comportamento mudou
+por causa de um defeito encontrado em producao, o spec registra tambem o estado anterior e o
+sintoma, que e a parte que impede alguem de "simplificar" de volta para o bug. Procure os paragrafos
+iniciados por **Historico**, **Por que** ou pela mencao ao comportamento antigo.
+
+Dois atalhos para quem chega agora:
+
+- A regra de teste que vale para a suite inteira esta em [`PRD.md`](PRD.md) secao 13: *o teste le o destino*.
+- A decisao de arquitetura menos obvia - contexto de skill sob demanda - esta em [`skill-user.md`](skill-user.md).
+
 ## Suggested Reading Order
 
 1. **PRD.md** - Metas do projeto, escopo, metricas de sucesso
@@ -31,7 +41,7 @@ Documentacao de especificacao do sistema GeneriClaw. Cada arquivo define o contr
 | agent-loop.md | AgentLoop | ReAct reasoning engine, tool call execution |
 | memory.md | Memory | SQLite schema, repository interfaces |
 | memory-manager.md | MemoryManager | Persistence facade, context window truncation |
-| llm-provider.md | LLM Providers | Provider abstraction, fallback, retry logic |
+| llm-provider.md | LLM Providers | Provider abstraction, fallback, retry, par `tool_calls`/`tool` |
 | tools.md | Tool Registry | Tool interface, registry, factory |
 | core-tools.md | Core Tools | Filesystem tools (criar, ler, listar arquivos) |
 | skill-user.md | Skill System | Hot-reload skills, loader, router |

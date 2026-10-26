@@ -45,13 +45,13 @@ Pergunta solta como *"que horas são?"* devolve `null` no passo zero e cai no ag
 | **4 provedores de LLM** | Gemini, DeepSeek, Groq e OpenRouter, atrás de uma interface única |
 | **Fallback em cadeia** | `FallbackProvider` percorre a lista configurada; cada um com retry e backoff |
 | **Memória local** | SQLite (`sql.js`) com janela de contexto deslizante e teto de tamanho |
-| **Skills hot-reload** | `fs.watch` sobre `agents/skills/`; criar uma pasta já a disponibiliza |
+| **Skills hot-reload** | `agents/skills/` é relido a cada mensagem; criar uma pasta já a disponibiliza |
 | **Ferramentas de arquivo** | `criar_arquivo`, `ler_arquivo`, `listar_arquivos`, presas à `WORKSPACE_ROOT` |
 | **Whitelist estrita** | Só IDs em `TELEGRAM_ALLOWED_USER_IDS` são atendidos |
 | **Degradação graciosa** | Sem `ffmpeg`/`whisper`/`edge-tts`, o bot sobe e desliga só a voz |
-| **Shutdown ordenado** | `SIGINT`/`SIGTERM` param polling, watcher e controller, com timeout de 10s |
+| **Shutdown ordenado** | `SIGINT`/`SIGTERM`, ou `/parar` no chat, param polling e controller, com timeout de 10s |
 
-**Ainda não há testes automatizados.** O `vitest` está configurado, mas a suíte não foi escrita — é a lacuna mais evidente do projeto hoje.
+**Testes:** `npm test` roda 93 testes em 15 arquivos (`vitest`). Vários deles leem o *destino* em vez da origem — o corpo JSON que sai para a API do LLM, o texto que chega na API do Telegram, os arquivos no disco, o stderr de um boot real — porque uma peça que "roda" não é uma peça que entrega.
 
 ---
 
@@ -64,7 +64,7 @@ src/
 ├── main.ts          # bootstrap: valida config, checa binários, monta o grafo, trata shutdown
 ├── config.ts        # validação de env com erro explícito (falha rápido, não em runtime)
 ├── core/            # AgentController (fachada do pipeline) + AgentLoop (motor ReAct)
-├── providers/       # Gemini, DeepSeek, Groq, OpenRouter + factory com fallback
+├── providers/       # Gemini + OpenAiCompat (DeepSeek, Groq, OpenRouter) + factory com fallback
 ├── memory/          # MemoryManager (janela, truncamento) + repositórios SQLite
 ├── skills/          # SkillLoader (hot-reload) + SkillRouter (passo zero)
 ├── tools/           # ToolRegistry + ferramentas de filesystem

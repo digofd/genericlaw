@@ -23,12 +23,14 @@ Precisamos desacoplar a parte de grammy/entrada de dados da parte de processamen
 
 ## 3. Goals (Objetivos)
 
-- [ ] G-01: Rodar uma iteracao abstrata e agnostica onde um `LLM` possa fornecer ou uma resposta final legivel, ou um Tool Call bem estruturado.
-- [ ] G-02: Executar automaticamente o call pelo Factory de tools e repassar a observacao como se fosse o usuario (`ToolOutput`) no proximo payload pro LLM.
-- [ ] G-03: Parar de forma deterministica por um hard limit configuravel (ex: 5 interacoes no MAX_ITERATIONS).
+- [x] G-01: Rodar uma iteracao abstrata e agnostica onde um `LLM` possa fornecer ou uma resposta final legivel, ou um Tool Call bem estruturado.
+- [x] G-02: Executar automaticamente o call pelo Factory de tools e repassar a observacao como se fosse o usuario (`ToolOutput`) no proximo payload pro LLM.
+- [x] G-03: Parar de forma deterministica por um hard limit configuravel (ex: 5 interacoes no MAX_ITERATIONS).
 - [x] G-04: Entregar as `ToolDefinition` do `ToolRegistry` ao provider em cada iteracao, como function declarations nativas.
 - [x] G-05: Nunca executar a mesma tool duas vezes com argumentos identicos dentro de um mesmo turno.
 - [x] G-06: Somar o consumo de tokens de todas as iteracoes do turno.
+- [x] G-07: Registrar a tool call na mensagem do assistente, para o resultado seguinte nao viajar orfao (ver 8.7).
+- [x] G-08: Respeitar `LOG_MESSAGE_CONTENT` ao logar argumentos de tool (ver 8.8).
 
 **Metricas de sucesso:**
 | Metrica | Baseline atual | Target | Prazo |
@@ -104,8 +106,16 @@ Precisamos desacoplar a parte de grammy/entrada de dados da parte de processamen
 ```typescript
 class AgentLoop {
   private maxIterations: number;
+  private toolTimeoutMs: number;
+  private logMessageContent: boolean;   // padrao false; ver 8.8
 
-  constructor(config: { maxIterations: number; toolTimeoutMs: number });
+  constructor(config: {
+    maxIterations: number;
+    toolTimeoutMs: number;
+    logMessageContent?: boolean;
+  });
+
+  getBaseSystemPrompt(): string;        // o AgentController o injeta como mensagem [0]
 
   async run(
     messages: LlmMessage[],
@@ -157,6 +167,40 @@ Se o provider sinaliza `finishReason: "error"`, o AgentLoop propaga isso como
 entregue como resposta normal - o OutputHandler precisa do campo para escolher a `ErrorOutputStrategy`
 (ver `telegram-output.md`).
 
+### 8.7 Registro da tool call na mensagem do assistente
+
+Ao executar uma ferramenta, o loop anexa **duas** mensagens ao contexto, nesta ordem:
+
+```typescript
+{ role: "assistant", content: texto || `Calling tool: ${nome}`, toolCalls: [toolCall] }
+{ role: "tool",      content: resultado, toolCallId: toolCall.id }
+```
+
+O campo `toolCalls` na primeira **nao e opcional na pratica**: as APIs compativeis com OpenAI
+recusam com `400` um `role: "tool"` que nao responda a um `assistant` com `tool_calls` de mesmo
+`id` (ver `llm-provider.md` 8.6). Omitir o campo quebra DeepSeek e Groq diretos em toda segunda
+iteracao de qualquer turno com ferramenta.
+
+A mensagem de deduplicacao (8.4) tambem carrega `toolCallId`, e por isso a chamada suprimida
+continua sendo registrada em `alreadyExecuted` **antes** de o resultado ser injetado - caso
+contrario a segunda ocorrencia seria um orfao.
+
+### 8.8 Log de argumentos e `LOG_MESSAGE_CONTENT`
+
+Cada execucao de tool e logada como
+`[AgentLoop] Tool <nome>(<args>) executed: success|failure`. Os argumentos passam por
+`describeArgs(args, logMessageContent)`:
+
+- **`logMessageContent: false` (padrao):** *toda* string vira `<N chars>`. Nomes de tool, chaves de
+  argumento e tamanhos continuam no log - o suficiente para seguir o fluxo sem gravar conteudo.
+- **`logMessageContent: true`:** strings ate 80 caracteres saem literais; acima disso ainda viram
+  `<N chars>`, porque um arquivo inteiro no log nao ajuda ninguem.
+
+O valor vem de `AppConfig.logging.logMessageContent`, injetado pelo bootstrap no construtor. Durante
+um periodo a flag existia na config, era lida do `.env` e testada - mas **nenhuma linha de codigo a
+consultava**, enquanto o README e tres specs prometiam que ela mantinha conteudo fora dos logs. Uma
+garantia de privacidade documentada e nao implementada e pior que a ausencia dela.
+
 **Componentes afetados:** Terminal log-output, Repasse assincrono pro Output de chat.
 
 ---
@@ -191,17 +235,20 @@ Nao gera tabelas SQL exclusivas, e stateful em RAM contendo arrays literais dura
 
 ## 12. Seguranca e Privacidade
 
-- As Tools sao injetadas em prompt - nunca expoe secrets nem paths internos completos que dao base para jailbreak explicito sem sanilizacao (a Tool deve usar regex no parsing dos envios).
+- **Tools nao sao injetadas em prompt.** Elas viajam pelo campo nativo de function calling de cada API (8.3). Descreve-las em texto nao habilita tool calling e so consome tokens.
+- O confinamento de paths e responsabilidade das proprias tools, via `resolveInWorkspace()` (ver `core-tools.md`). O AgentLoop nao valida argumentos alem do schema declarado em `ToolDefinition`.
+- Conteudo de mensagem so aparece no log quando `LOG_MESSAGE_CONTENT=true` (8.8).
 
 ---
 
 ## 13. Plano de Rollout
 
-1. Implementar `AgentLoop` com provider mockado e tool factory vazia para teste de iteracoes.
-2. Adicionar suporte a tool calls paralelas. Hoje apenas a primeira tool call de cada resposta e executada; as demais sao logadas e ignoradas.
-3. Integrar com `ProviderFactory` via `AgentController` (o Controller resolve o provider, o AgentLoop apenas chama `generate()`).
-4. Adicionar logs de Thought/Action/Observation.
-5. Testar edge cases EC-01 (JSON malformado), EC-02 (tool throw), EC-03 (max iterations).
+Entregue: loop ReAct com teto de iteracoes, execucao de tools com timeout, deduplicacao,
+contabilidade de tokens somada, registro do par `tool_calls`/`tool` e logs por iteracao. Coberto por
+`tests/agent-loop.test.ts`, `tests/provider-request-body.test.ts` e `tests/log-privacy.test.ts`.
+
+Em aberto: tool calls paralelas. Hoje apenas a primeira de cada resposta e executada; as demais sao
+logadas e ignoradas (EC-06).
 
 ---
 

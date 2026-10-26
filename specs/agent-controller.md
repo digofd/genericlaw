@@ -76,18 +76,33 @@ A ausencia do spec deixa ambigua a ordem de inicializacao dos subsistemas, a pro
 8. Controller monta o array completo de mensagens: system prompt (com tools + skill) + historico + mensagem atual. Esta e a unica etapa de assembly - o AgentLoop recebe o array pronto e nao adiciona mensagens do banco.
 9. Controller obtem o provider via `ProviderFactory.createWithFallback(...)` e o injeta no AgentLoop.
 10. Controller chama `AgentLoop.run(messages, provider, toolRegistry)`.
-11. AgentLoop retorna `AgentLoopResult` com a resposta final.
-12. Controller chama `MemoryManager.saveResponse(conversationId, result)`.
-13. Controller chama `OutputHandler.send(conversationId, result)`.
+11. AgentLoop retorna `AgentLoopResult` com a resposta final. O Controller preenche
+    `result.conversationId` e `result.requiresAudioReply` a partir do `ProcessedInput` - o AgentLoop
+    sempre devolve esses dois campos vazios, porque nao conhece a origem da mensagem.
+12. Controller chama `OutputHandler.send(conversationId, result)`, que devolve um `Delivered`
+    dizendo o que de fato saiu (`"voice"`, `"text"`, `"voice+text"`, `"error"`, `"blocked"`).
+13. Num `finally`, Controller chama `MemoryManager.saveResponse(conversationId, result, delivered)`
+    e loga `[AgentController] delivered: <valor>`.
 14. Resposta chega ao usuario no Telegram.
+
+**Por que o save vem depois do envio.** `delivered` so existe apos a tentativa de envio, e e o
+unico campo que distingue "pediu audio e recebeu audio" de "pediu audio e o TTS caiu para texto" -
+`requiresAudioReply` registra o pedido, nao a entrega. O `finally` garante que a resposta e
+persistida mesmo quando o envio falha; a janela de perda (processo morrer entre envio e gravacao)
+ja existia pelo autosave de 5s do `MemoryManager`.
 
 **Retroactive blocking (mid-session):** Se o OutputHandler detectar erro 403 "Forbidden: bot was blocked by the user" durante o envio, ele emite um evento `userBlocked`. O AgentController captura e chama `MemoryManager.markConversationBlocked(conversationId)`. Na proxima mensagem deste usuario, o passo 3 detecta o bloqueio e descarta o processamento. Ver telegram-output.md EC-03 e Q3.
 
 **Propagacao de `requiresAudioReply`:** O flag segue o pipeline completo:
 1. `TelegramInputHandler` injeta `requiresAudioReply: true` no `ProcessedInput` quando o input e voz ou contem keyword explicita (ver telegram-input.md RF-06).
 2. `AgentController` repassa o flag sem modificacao do `ProcessedInput` para o `AgentLoop` - ele nao toma decisao sobre audio, apenas preserva o metadado.
-3. `AgentLoop` copia `input.requiresAudioReply` para `AgentLoopResult.requiresAudioReply`. O LLM NAO pode determinar se a resposta deve ser em audio - o flag e determinado exclusivamente pelo tipo de input (voz -> audio, texto -> texto), exceto por keyword explicita no texto do usuario.
+3. O `AgentLoop` **nao** conhece o flag: ele sempre devolve `requiresAudioReply: false`, e o
+   `AgentController` sobrescreve o campo com o valor do `ProcessedInput` ao receber o resultado. O
+   LLM nao pode determinar se a resposta deve ser em audio - o flag vem exclusivamente do tipo de
+   input (voz -> audio, texto -> texto), exceto por keyword explicita no texto do usuario.
 4. `OutputHandler` decide a estrategia: `finishReason === "error"` -> `ErrorOutputStrategy`; senao `requiresAudioReply` -> `AudioOutputStrategy`; senao `TextOutputStrategy`.
+5. A estrategia devolve o que entregou, e esse valor - nao o flag - e o que fica gravado no
+   `metadata` da mensagem (ver passo 13 do fluxo principal e `telegram-output.md` 8.2).
 
 A precedencia e: erro de provider > input de voz > keyword explicita no texto > padrao texto. Arquivos gerados nao afetam a escolha: eles sao criados no `WORKSPACE_ROOT` pela tool `criar_arquivo` e apenas citados na resposta.
 
@@ -96,12 +111,17 @@ A precedencia e: erro de provider > input de voz > keyword explicita no texto > 
 O AgentController e o unico responsavel por montar o array completo de mensagens que o AgentLoop consome. Nenhum outro modulo adiciona conteudo ao system prompt. A montagem segue esta estrutura e ordem:
 
 ```
-[0] System message: base system prompt (definido pelo AgentController)
-[1] System message: tool definitions (`toolRegistry.getToolDefinitions()`)
-[2] System message: skill system prompt (se skill ativa, carregado via `SkillLoader`)
-[3..N] Mensagens historicas (`memoryManager.getRecentMessages()`)
-[N+1] Mensagem atual do usuario (`ProcessedInput.content`)
+[0] System message: base system prompt (`agentLoop.getBaseSystemPrompt()`)
+[1] System message: skill system prompt (se skill ativa, via `SkillManifest.systemPrompt`)
+[2..N] Mensagens historicas (`memoryManager.getRecentMessages()`)
 ```
+
+**Nao existe mensagem de tool definitions.** As `ToolDefinition` vao ao provider pelo campo nativo
+de function calling, nunca como texto de prompt (ver `agent-loop.md` 8.3).
+
+**A mensagem atual do usuario nao e anexada separadamente.** O Controller chama
+`saveMessage(conversationId, "user", content)` **antes** de `getRecentMessages()`, entao o historico
+ja termina com o turno atual. Empurra-lo de novo duplicaria a pergunta no prompt.
 
 **Regras de delimitacao:** Cada componente do system prompt e uma mensagem separada com `role: "system"`. A concatenacao nao usa delimitadores textuais - cada bloco e uma mensagem independente no array.
 
@@ -109,17 +129,17 @@ O AgentController e o unico responsavel por montar o array completo de mensagens
 
 | Componente | Quem gera | Quem injeta |
 |------------|-----------|-------------|
-| Base system prompt | AgentController (string fixa) | AgentController |
-| Tool definitions | ToolRegistry.getToolDefinitions() | AgentController |
+| Base system prompt | AgentLoop.getBaseSystemPrompt() | AgentController |
 | Skill system prompt | SkillLoader (via `SkillManifest.systemPrompt`) | AgentController |
-| Historico | MemoryManager.getRecentMessages() | AgentController |
-| Mensagem atual | ProcessedInput.content | AgentController |
+| Historico (ja inclui o turno atual) | MemoryManager.getRecentMessages() | AgentController |
+| Tool definitions | ToolRegistry.getToolDefinitions() | **AgentLoop**, via `provider.generate()` - nunca no prompt |
 
 O AgentLoop NAO consulta o banco de dados e NAO carrega skills: recebe o array de mensagens pronto via `run(messages, provider, toolRegistry)`. O `toolRegistry` serve para duas coisas: resolver a tool a executar (`get(name)`) e obter as `ToolDefinition` entregues ao provider como function declarations nativas a cada iteracao. O AgentController **nao** injeta tools no prompt - descreve-las em texto nao habilita function calling e apenas consome tokens.
 
-**Regra para historico vazio (conversa nova):** Se `getRecentMessages()` retornar array vazio (EC-03: nova conversa), nenhuma mensagem historica e inserida. O array montado e: `[0]` system prompt base, `[1]` tool definitions, `[2]` skill system prompt (se ativa), `[3]` mensagem atual do usuario. Os indices `[3..N]` colapsam - nao ha placeholder, gap, ou deslocamento de indices. O `[N+1]` da formula original equivale a `[3]` quando o historico esta vazio.
-
-Esta secao resolve as ambiguidades.
+**Regra para historico vazio (conversa nova):** nao existe esse caso na pratica. Como a mensagem do
+usuario e salva antes da leitura, `getRecentMessages()` devolve no minimo um elemento - o turno
+atual. Um retorno vazio aqui significa `MEMORY_WINDOW_SIZE` invalido, que a validacao de config
+agora recusa no boot (ver `configuration.md` 3).
 
 ### 6.3 Fluxos Alternativos
 
@@ -133,10 +153,15 @@ Esta secao resolve as ambiguidades.
 2. Controller pula etapa de carregamento de skill e prossegue com o AgentLoop generico (chatbot casual).
 
 **Fluxo Alternativo C - Shutdown durante processamento:**
-1. `shutdown()` e chamado enquanto uma mensagem esta no AgentLoop.
-2. Controller seta flag `isShuttingDown = true`.
-3. Requisicao atual conclui normalmente (nao e abortada).
-4. Novas requisicoes sao rejeitadas com "Sistema em desligamento."
+1. `shutdown()` e chamado enquanto uma mensagem esta no AgentLoop (SIGINT, SIGTERM ou `/parar`).
+2. Controller seta `isShuttingDown = true` e aguarda as promises pendentes com `Promise.allSettled`.
+3. O raciocinio em voo **conclui**, mas a resposta **nao e enviada**: o passo de envio checa
+   `isShuttingDown` e a descarta. A mensagem ainda e persistida, com `delivered: "none"`.
+4. Novas mensagens sao rejeitadas antes de qualquer processamento.
+
+**Consequencia conhecida:** quem manda `/parar` logo apos uma pergunta pode nunca ver a resposta,
+mesmo ela estando no banco. E o preco de encerrar rapido; se o comportamento desejado fosse o
+oposto, o envio precisaria acontecer antes de a flag subir.
 
 ---
 
@@ -187,20 +212,45 @@ class AgentController {
   private skillLoader: SkillLoader;
   private agentLoop: AgentLoop;
   private memoryManager: MemoryManager;
-  private outputHandler: TelegramOutputHandler;
+  private toolRegistry: ToolRegistry;
   private providerFactory: ProviderFactory;
+  private eventEmitter: EventEmitter;
+  private config: AppConfig;
   private isShuttingDown: boolean;
-  private processingQueue: Map<string, Promise<void>>;  // conversationId -> Promise
+  private processingQueue: Map<string, Promise<void>>;  // conversationId -> ultima promise
+  private pendingCount: Map<string, number>;            // conversationId -> quantas na fila
 
-  constructor(deps: AgentControllerDeps);
+  constructor(deps: AgentControllerDeps);                // nao ha init(): o construtor so guarda deps
 
-  async init(): Promise<boolean>;
-  async handle(input: ProcessedInput): Promise<void>;
+  async handle(input: ProcessedInput, ctx: Context): Promise<void>;
+  resetConversation(conversationId: string): number;     // /novo - delega a clearMessages
   async shutdown(): Promise<void>;
 }
 ```
 
-**Concurrency queue (`processingQueue`):** Map interno que serializa mensagens da mesma conversa. Quando `handle()` recebe `ProcessedInput`, verifica se `processingQueue` ja tem uma Promise pendente para aquele `conversationId`. Se tiver, a nova mensagem aguarda (`await`) a Promise existente antes de iniciar, garantindo ordem FIFO por conversa. Conversas diferentes processam em paralelo. Limite: no maximo 5 mensagens pendentes por conversationId (ver EC-02). Timeout de stall: 5 minutos. Esta fila previne processamento concorrente dentro do mesmo processo. Para guarda de instancia entre processos, ver bootstrap.md EC-05 (arquivo de lock `./data/genericlaw.lock`).
+**Nao existe `init()`.** O construtor apenas guarda as dependencias ja inicializadas e registra o
+listener de `userBlocked`. Quem inicializa subsistemas e o bootstrap, antes de construir o
+Controller.
+
+**O `TelegramOutputHandler` nao e um campo.** Ele e construido por mensagem dentro de `process()`,
+porque encapsula o `Context` daquele update do grammy - um handler de longa duracao responderia
+sempre ao mesmo chat.
+
+**Concurrency queue (`processingQueue` + `pendingCount`):** `processingQueue` guarda a **ultima**
+promise de cada conversa; uma mensagem nova aguarda essa promise antes de comecar, o que serializa
+a conversa em FIFO. Conversas diferentes correm em paralelo. `pendingCount` conta quantas estao na
+fila e rejeita a partir de 5 (EC-02) - sem ele, a fila nao teria como se medir, ja que o Map guarda
+uma unica entrada por conversa.
+
+**Timer de stall:** a espera pela promise anterior corre contra um `setTimeout` de 5 minutos
+(`Promise.race`). Se ele vence, o loga-se o stall e a mensagem segue em paralelo com a anterior. O
+timer e **cancelado num `finally`** - sem o `clearTimeout`, cada mensagem enfileirada segurava o
+event loop por 5 minutos depois de o trabalho ter terminado.
+
+Esta fila previne processamento concorrente **dentro do mesmo processo**. Nao ha guarda entre
+processos: duas instancias com o mesmo `TELEGRAM_BOT_TOKEN` disputam o polling (ver `bootstrap.md`
+EC-05).
+
 ---
 
 ## 9. Modelo de Dados
@@ -226,8 +276,10 @@ O Controller nao gera tabelas. Ele orquestra o `MemoryManager`, que e o dono da 
 
 | Cenario | Trigger | Comportamento esperado |
 |---------|---------|----------------------|
-| EC-01: Falha na inicializacao de subsistema | DB corrompido, skill folder ausente, provider sem API key. | `init()` retorna `false`. Controller loga qual subsistema falhou e o processo termina com codigo de erro. |
-| EC-02: Duas mensagens concorrentes do mesmo usuario | Usuario envia segunda mensagem antes da primeira terminar. | Fila implicita por conversationId: o Controller mantem um `Map<conversationId, Promise>` interno que serializa mensagens da mesma conversa. A segunda mensagem aguarda a Promise da primeira resolver antes de iniciar. Conversas diferentes processam em paralelo. Limite: no maximo 5 mensagens pendentes por conversationId. Acima disso, mensagens sao descartadas com warning: `[AgentController] Message queue full for conversation <id>. Dropping oldest pending.` Timeout de stall: se uma Promise pendente nao resolver em 5 minutos, e considerada stall e descartada. |
+| EC-01: Falha na inicializacao de subsistema | DB corrompido, provider sem API key, token invalido. | Tratado inteiramente no **bootstrap**, antes de o Controller existir (ver `bootstrap.md` 5). O Controller nao tem `init()` e nao valida subsistemas. |
+| EC-02: Duas mensagens concorrentes do mesmo usuario | Usuario envia segunda mensagem antes da primeira terminar. | Fila por conversationId (ver 8.3). A segunda aguarda a promise da primeira antes de iniciar; conversas diferentes correm em paralelo. A partir de 5 pendentes, a nova e **recusada na entrada** - nao se descarta a mais antiga - com warning `[AgentController] Queue full for conversation <id>; rejecting this message.` e um aviso ao usuario no chat. Se a promise anterior nao resolver em 5 minutos, o stall e logado e a mensagem segue em paralelo. |
+| EC-05: Falha ao rotear skill | `SkillRouter.route()` lanca (provider fora do ar, JSON invalido). | Capturado e tratado como `skillName = null`: o turno segue no agente raiz. Uma falha de roteamento nunca derruba a mensagem. |
+| EC-06: Erro nao tratado no pipeline | Qualquer excecao entre o roteamento e o envio. | Capturada no `catch` do `process()`, logada, e respondida ao usuario com "Nao consegui processar sua mensagem." Falhar em silencio aqui seria indistinguivel do bot ignorando o usuario, o que esconderia bugs de pipeline indefinidamente. |
 | EC-03: Conversa nova sem historico | Primeira mensagem de um usuario sem conversationId ativo. | Controller cria nova conversation via `MemoryManager.createConversation(userId)` e prossegue normalmente. |
 | EC-04: Resultado do AgentLoop sem resposta textual | LLM retorna apenas tool calls sem texto final. | Controller usa `AgentLoopResult.finalResponse` que e sempre populado pelo loop (seja resposta do LLM ou mensagem de fallback). |
 
@@ -237,17 +289,17 @@ O Controller nao gera tabelas. Ele orquestra o `MemoryManager`, que e o dono da 
 
 - **Isolamento de contexto:** Cada `conversationId` e isolado. O Controller nunca cruza mensagens de conversas diferentes.
 - **Propagacao de erros segura:** Mensagens de erro enviadas ao usuario nunca contem dados internos (paths, API keys, stack traces). Apenas mensagens amigaveis.
-- **Log seguro:** Logs de depuracao podem conter conteudo de mensagens. Em producao, logs de conteudo devem ser desabilitados via flag `LOG_MESSAGE_CONTENT=false`.
+- **Log seguro:** o Controller nunca loga conteudo de mensagem - apenas `source`, `conversationId`, nome da skill e `delivered`. O unico ponto do pipeline que pode emitir conteudo e o log de argumentos de tool do AgentLoop, controlado por `LOG_MESSAGE_CONTENT` (ver `agent-loop.md` 8.8).
 
 ---
 
 ## 13. Plano de Rollout
 
-1. Implementar `AgentController` com dependencias mockadas para teste do pipeline.
-2. Integrar com `TelegramInputHandler` real.
-3. Integrar com `SkillRouter` e `AgentLoop` reais.
-4. Adicionar `shutdown()` e testes de encerramento gracioso.
-5. Adicionar logs de transicao de etapa.
+Entregue: pipeline completo, fila por conversa com teto e deteccao de stall, bloqueio de usuario por
+evento, `resetConversation()` para `/novo`, shutdown aguardando mensagens em voo, e registro de
+`delivered`. Coberto por `tests/controller-queue.test.ts`.
+
+Em aberto: nenhum item de rollout. Ver 6.3 Fluxo C para a consequencia conhecida do shutdown.
 
 ---
 

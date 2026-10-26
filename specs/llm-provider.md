@@ -4,7 +4,13 @@
 
 ## 1. Resumo
 
-O sistema de provedores abstrai a comunicacao com APIs externas de LLM (Gemini, DeepSeek, Groq). Ele define uma interface uniforme (`ILlmProvider`) que o Agent Loop consome sem saber qual provedor esta ativo. Uma `ProviderFactory` seleciona e instancia o provedor configurado, com fallback automatico em caso de falha.
+O sistema de provedores abstrai a comunicacao com APIs externas de LLM. Ele define uma interface uniforme (`ILlmProvider`) que o Agent Loop consome sem saber qual provedor esta ativo. Uma `ProviderFactory` seleciona e instancia o provedor configurado, com fallback automatico em caso de falha.
+
+**Duas implementacoes, nao quatro.** `GeminiProvider` fala o protocolo nativo do Gemini;
+`OpenAiCompatProvider` fala o protocolo de chat completions da OpenAI e atende DeepSeek, Groq e
+OpenRouter - as diferencas entre eles sao URL, modelo padrao e headers, e vivem em configuracao
+(`DIRECT_PRESETS`, `openRouterProvider()`), nao em codigo duplicado. Antes eram tres arquivos de
+~150 linhas que diferiam em 7 linhas; toda correcao de protocolo precisava ser feita tres vezes.
 
 ---
 
@@ -24,10 +30,11 @@ Sem essa especificacao, cada desenvolvedor implementa o provider de um jeito dif
 ## 3. Goals (Objetivos)
 
 - [x] G-01: Definir a interface `ILlmProvider` com metodo unico `generate(messages, tools?): Promise<LlmResponse>`.
-- [ ] G-02: A `ProviderFactory` deve instanciar o provedor correto a partir de uma string de configuracao (`LLM_PROVIDER`).
-- [ ] G-03: Implementar fallback automatico: se o provedor primario falhar, tentar o proximo da cadeia configurada.
-- [ ] G-04: Todo provider deve formatar mensagens do formato interno do GeneriClaw para o formato nativo da API alvo.
-- [ ] G-05: Suportar retry com exponential backoff para erros transientes (429, 503).
+- [x] G-02: A `ProviderFactory` deve instanciar o provedor correto a partir de uma string de configuracao (`LLM_PROVIDER`).
+- [x] G-03: Implementar fallback automatico: se o provedor primario falhar, tentar o proximo da cadeia configurada.
+- [x] G-04: Todo provider deve formatar mensagens do formato interno do GeneriClaw para o formato nativo da API alvo.
+- [x] G-05: Suportar retry com exponential backoff para erros transientes (429, 503).
+- [x] G-06: O par `tool_calls` / `role: "tool"` deve atravessar intacto ate o corpo da requisicao (ver 8.6).
 
 **Metricas de sucesso:**
 | Metrica | Baseline atual | Target | Prazo |
@@ -111,7 +118,8 @@ Sem essa especificacao, cada desenvolvedor implementa o provider de um jeito dif
 interface LlmMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
-  toolCallId?: string;
+  toolCallId?: string;          // em role: "tool" - a qual chamada este resultado responde
+  toolCalls?: ToolCall[];       // em role: "assistant" - as chamadas que esta mensagem pediu. Ver 8.6.
   name?: string;  // Deferido para v2: reservado para tool call responses com identificacao do agente. Nao populado no MVP. Ver Q4.
 }
 
@@ -151,17 +159,50 @@ class ProviderFactory {
   private providers: Map<string, ILlmProvider> = new Map();
 
   register(name: string, provider: ILlmProvider): void;
-  create(name: string): ILlmProvider;
+  create(name: string): ILlmProvider;           // lanca se o nome nao foi registrado
   createWithFallback(names: string[]): ILlmProvider;  // retorna proxy com fallback
+  getNames(): string[];                         // nomes registrados - o bootstrap usa para falhar rapido
+
+  static createFromConfig(config): ProviderFactory;
 }
 ```
+
+`createFromConfig()` registra, para cada nome em `[primaryProvider, ...fallbackProviders]`:
+
+- **Com `OPENROUTER_API_KEY`:** um `OpenAiCompatProvider` apontando para o OpenRouter, para *todos*
+  os nomes. Uma chave atende a cadeia inteira.
+- **Sem ela:** `gemini` vira `GeminiProvider`; nomes em `DIRECT_PRESETS` (`deepseek`, `groq`) viram
+  `OpenAiCompatProvider` com a URL e o modelo do preset; qualquer outro nome e pulado com warning.
+
+**Nome pulado e silencioso por construcao**, e por isso o bootstrap compara `getNames()` com a lista
+configurada e encerra o processo se faltar algum (ver `bootstrap.md` 5). Sem essa checagem o bot
+sobe saudavel e responde "Nenhum provedor de IA disponivel." a *toda* mensagem, sem nada no boot
+indicando o porque.
+
+### 8.2.1 OpenAiCompatProvider
+
+```typescript
+interface OpenAiCompatConfig {
+  name: string;          // aparece no log e nas mensagens de erro
+  url: string;           // endpoint de chat completions
+  apiKey: string;
+  model: string;
+  headers?: Record<string, string>;   // OpenRouter exige HTTP-Referer e X-Title
+  timeoutMs?: number;
+  retryCount?: number;
+  retryBaseDelayMs?: number;
+}
+```
+
+Acrescentar um provedor OpenAI-compativel e acrescentar uma entrada em `DIRECT_PRESETS` - nenhuma
+classe nova.
 
 ### 8.3 Traducao de tools por provider
 
 Cada provider converte `ToolDefinition[]` para o formato nativo da sua API. `ToolDefinition` ja tem
 o shape de `function` da OpenAI, entao a conversao e so o involucro:
 
-- **OpenAI-like (DeepSeek, Groq, OpenRouter):** `body.tools = tools.map(t => ({ type: "function", function: t }))`, via o helper compartilhado `toOpenAiTools()`.
+- **OpenAI-like (`OpenAiCompatProvider`: DeepSeek, Groq, OpenRouter):** `body.tools = tools.map(t => ({ type: "function", function: t }))`, via o helper compartilhado `toOpenAiTools()`. As mensagens passam por `toOpenAiMessages()` (ver 8.6).
 - **Gemini:** `body.tools = [{ functionDeclarations }]`, com um mapeamento real do schema - o tipo vira enum maiusculo (`OBJECT`, `STRING`), o booleano `required` por propriedade e **removido** (o Gemini so aceita `required` como array no nivel do objeto), e `properties`/`items` sao convertidos recursivamente.
 
 Se `tools` vier vazio ou ausente, o campo nao e enviado.
@@ -194,6 +235,47 @@ de descartado - `401`/`402`/`404` sozinhos nao dizem se o problema e a chave, o 
 removido do catalogo.
 
 O Gemini nativo nao tem esse comportamento: ele reporta erro via status HTTP.
+
+### 8.6 O par `tool_calls` / `role: "tool"` (obrigatorio)
+
+Nas APIs compativeis com OpenAI, uma mensagem `role: "tool"` **so e valida se a mensagem `assistant`
+anterior declarar `tool_calls` com o mesmo `id`**. Um resultado orfao e recusado com
+`400 Invalid parameter: messages with role 'tool' must be a response to a preceding message with
+'tool_calls'`.
+
+Por isso `LlmMessage` carrega `toolCalls`, o AgentLoop o preenche ao registrar a chamada
+(`agent-loop.md` 8.7), e os providers OpenAI-like serializam tudo pelo helper compartilhado
+`toOpenAiMessages()`:
+
+```typescript
+// role: "assistant" com toolCalls vira
+{ role: "assistant", content: "...", tool_calls: [
+    { id, type: "function", function: { name, arguments: JSON.stringify(args) } }
+]}
+// e o resultado seguinte referencia aquele id
+{ role: "tool", content: "...", tool_call_id: id }
+```
+
+**Historico:** por um periodo o AgentLoop registrava a mensagem do assistente **sem** o campo - ele
+nem existia em `LlmMessage` - e enviava o resultado orfao. DeepSeek e Groq diretos recusavam toda
+segunda iteracao de qualquer turno com ferramenta; parte dos modelos do OpenRouter toleravam, o que
+escondeu o defeito. Nenhum teste olhava o corpo da requisicao, so a origem.
+
+**O Gemini nao usa este par.** `formatMessages()` converte o resultado para
+`{ role: "user", parts: [{ text: "Tool result: ..." }] }` - texto comum, sempre valido. Funciona,
+mas perde a associacao explicita entre chamada e resultado; com uma tool call por iteracao
+(`agent-loop.md` EC-06) o modelo resolve pelo contexto.
+
+### 8.7 Estrategia de teste: ler o corpo enviado, nao o objeto montado
+
+Os testes de provider (`tests/provider-request-body.test.ts`) interceptam `fetch` e inspecionam o
+**JSON que seria enviado** - o destino, nao a origem. A invariante verificada em cada provider
+OpenAI-like e a da 8.6: toda mensagem `role: "tool"` tem um `assistant` anterior declarando aquele
+`tool_call_id`.
+
+Cada caso planta dois marcadores: um no campo investigado (o `id` da tool call) e um **de controle**
+no texto do usuario, que comprovadamente chega. Se o de controle nao aparece, quem esta quebrada e a
+busca, nao a peca - e a conclusao de "nao achei" seria falsa.
 
 ---
 
@@ -235,12 +317,12 @@ Nao gera tabelas SQLite. Estado e transiente durante a requisicao.
 
 ## 13. Plano de Rollout
 
-1. Implementar `ILlmProvider` e classes base.
-2. Implementar `GeminiProvider` (provider primario inicial).
-3. Implementar `ProviderFactory` com fallback.
-4. Adicionar `DeepSeekProvider`.
-5. Adicionar `GroqProvider`.
-6. Integrar com Agent Loop.
+Entregue. `ILlmProvider`, `GeminiProvider`, `OpenAiCompatProvider` (DeepSeek, Groq, OpenRouter),
+`ProviderFactory` com fallback, retry com backoff e integracao com o AgentLoop estao implementados e
+cobertos por testes.
+
+Proximo passo em aberto: tool calls paralelas - hoje o AgentLoop executa apenas a primeira de cada
+resposta (ver `agent-loop.md` EC-06).
 
 ---
 
@@ -248,5 +330,5 @@ Nao gera tabelas SQLite. Estado e transiente durante a requisicao.
 
 - Q1 (Resolvida): Truncamento hard no byte 65536, executado pelo MemoryManager ao persistir a resposta no banco (ver memory.md Q3). O provider retorna a resposta completa. O AgentLoop opera com a resposta completa em RAM. Apenas na persistencia o conteudo e truncado.
 - Q2 (Resolvida): NG-02 cobre apenas LLMs self-hosted (Ollama, LM Studio, llama.cpp local). Whisper local e Edge-TTS sao dependencias de sistema explicitamente incluidas no escopo do MVP para STT/TTS.
-- Q3 (Resolvida): Mock de HTTP com `nock` ou `msw`. Cada provider tera testes unitarios que interceptam chamadas HTTP e retornam respostas pre-definidas (200 com tool calls, 429, 503, JSON malformado). Testes de integracao do ProviderFactory validam a cadeia de fallback com providers mockados.
+- Q3 (Resolvida): sem `nock` nem `msw` - `vi.stubGlobal("fetch", ...)` do proprio vitest basta e nao adiciona dependencia. Ver 8.7 para o que os testes verificam e por que eles leem o corpo enviado.
 - Q4 (Deferido para v2): Campo `name` na interface `LlmMessage` nao e populado no MVP. Reservado para respostas de tool call que identifiquem o agente ou funcao chamadora (ex: OpenAI function calling usa `name` para associar respostas de funcao ao nome da funcao). Sera populado quando tool calls retornarem resultados com identificacao explicita do executor.

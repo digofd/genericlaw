@@ -24,12 +24,13 @@ A lib Grammy suporta streaming de arquivos anexos por `getFile()`. O Nodejs lida
 
 ## 3. Goals (Objetivos)
 
-- [ ] G-01: Receber mensagens puras de texto (`message:text`) dos usuarios em whitelist e encaminhar de forma crua ao Pipeline AI (`skill -> agent -> output`).
+- [x] G-01: Receber mensagens puras de texto (`message:text`) dos usuarios em whitelist e encaminhar de forma crua ao Pipeline AI (`skill -> agent -> output`).
 - [x] G-02: Receber envios de anexo (`message:document`) que sejam do tipo `.pdf` ou `.md`, extrair o texto (via pdf-parse ou leitura UTF-8) e **armazenar o resultado no workspace**, entregando ao modelo um ponteiro em vez do documento inteiro.
 - [x] G-03: Expor o comando `/novo` (alias `/reset`) para limpar o historico da conversa.
-- [ ] G-03: Receber mensagens de voz (`message:voice`) e arquivos de audio (`message:audio`) de qualquer formato suportado, baixar temporariamente e realizar a transcricao para texto utilizando processamento STT (Speech-to-Text) com Whisper local. O texto transcrito e encaminhado ao Pipeline AI como se fosse texto digitado.
-- [ ] G-04: Informar instantaneamente ao usuario "Typing..." ou "Recording voice..." via API Telegram pra que o usuario saiba que a string de download/analise pesada esta de fato sob carga de processamento e nao engasgou.
-- [ ] G-05: Injetar metadados no Agent Loop quando o input do usuario for originado de um audio (Voice Note), sugerindo ao LLM ou ao Output Handler que responda em voz (TTS via `pt-BR-ThalitaMultilingualNeural`) na saida, a depender das regras globais do bot.
+- [x] G-03b: Expor o comando `/parar` (alias `/stop`) para encerrar o processo a pedido do usuario em whitelist.
+- [x] G-04: Receber mensagens de voz (`message:voice`) e arquivos de audio (`message:audio`) de qualquer formato suportado, baixar temporariamente e realizar a transcricao para texto utilizando processamento STT (Speech-to-Text) com Whisper local. O texto transcrito e encaminhado ao Pipeline AI como se fosse texto digitado.
+- [x] G-05: Informar instantaneamente ao usuario "Typing..." ou "Recording voice..." via API Telegram pra que o usuario saiba que a string de download/analise pesada esta de fato sob carga de processamento e nao engasgou.
+- [x] G-06: Injetar metadados no Agent Loop quando o input do usuario for originado de um audio (Voice Note), sugerindo ao LLM ou ao Output Handler que responda em voz (TTS via `pt-BR-ThalitaMultilingualNeural`) na saida, a depender das regras globais do bot.
 
 **Metricas de sucesso:**
 | Metrica | Baseline atual | Target | Prazo |
@@ -196,26 +197,42 @@ configuravel via `WHISPER_LANGUAGE`.
 `main` existe apenas como stub que imprime um aviso de depreciacao e sai - o binario real e
 `whisper-cli`, e e esse que o setup seleciona.
 
-**Contrato de download/extracao:** `downloadFile` obtem URL de download via `bot.api.getFile()` e faz
-stream para `tmpDir`. `extractPdfText` usa `pdf-parse`. `extractMarkdownText` le o arquivo como
-UTF-8. Ambos retornam string vazia em caso de falha. Arquivos temporarios sao deletados no
-`finally` de cada handler.
+**Contrato de download/extracao:** `downloadFile` obtem a URL via `bot.api.getFile()` e grava em
+`tmpDir` como `download-<uuid>.<ext>`. `extractPdfText` usa `pdf-parse`; markdown e lido como UTF-8.
+Arquivos temporarios sao deletados no `finally` de cada handler.
+
+**O nome do temporario usa `crypto.randomUUID()`, nao `Date.now()`.** Dois uploads no mesmo
+milissegundo geravam o mesmo caminho: o segundo sobrescrevia o arquivo do primeiro **antes de ele
+ser lido**, e os dois turnos processavam o mesmo conteudo - um documento sumia em silencio. A
+fronteira de `await` entre gravar e ler basta para a corrida acontecer.
 
 **Contrato de armazenamento de upload:** o texto extraido **nao** vira o conteudo da mensagem. Ele e
-gravado no `WORKSPACE_ROOT` em `uploads/<nome-seguro>` via `CriarArquivoTool` (com
-`overwrite: true`, para que reenviar o mesmo arquivo o substitua), e o `ProcessedInput.content`
-recebe um ponteiro curto: o nome original, o caminho no workspace, o tamanho em caracteres, a
-instrucao de usar `ler_arquivo`, e uma previa de 500 caracteres.
+gravado no `WORKSPACE_ROOT` em `uploads/<nome-seguro>` via `CriarArquivoTool`, e o
+`ProcessedInput.content` recebe um ponteiro curto: o nome original, o caminho no workspace, o
+tamanho em caracteres, a instrucao de usar `ler_arquivo`, e uma previa de 500 caracteres.
 
 O motivo e custo: o conteudo de uma mensagem e reenviado como contexto a cada turno seguinte dentro
 da janela `MEMORY_WINDOW_SIZE`. Um PDF embutido inteiro (limitado a 64KB pelo MemoryManager) seria
 reproduzido em ~20 turnos. Medido com um PDF real de 201KB: o primeiro prompt ficou em 1.1k tokens,
 contra cerca de 16k se o texto fosse embutido.
 
-`uploadPathFor(fileName, isPdf)` deriva o destino: aplica `path.basename` (um `file_name` do Telegram
-e dado do usuario e pode conter `../`), substitui caracteres inseguros, troca a extensao `.pdf` por
-`.md`, e cai para `documento` se nada utilizavel sobrar. Se a gravacao falhar, o handler degrada
-embutindo o texto como antes, em vez de perder o documento.
+`uploadPathFor(fileName, isPdf, existe?)` deriva o destino: aplica `path.basename` (um `file_name`
+do Telegram e dado do usuario e pode conter `../`), substitui caracteres inseguros, troca a extensao
+`.pdf` por `.md`, e cai para `documento` se nada utilizavel sobrar. Se a gravacao falhar, o handler
+degrada embutindo o texto como antes, em vez de perder o documento.
+
+**Nomes repetidos nao se sobrescrevem.** O terceiro parametro e um predicado de existencia; quando
+`uploads/contrato.md` ja existe, o destino vira `uploads/contrato-2.md`, depois `-3`, e assim por
+diante. O handler o alimenta com `resolveInWorkspace() + fs.existsSync()`.
+
+O comportamento anterior era `overwrite: true` fixo, com a justificativa de que reenviar o mesmo
+arquivo deveria substituir o anterior. O problema e que o nome vem do usuario e colide entre
+documentos diferentes: dois `contrato.pdf` de clientes distintos deixavam apenas o segundo em disco,
+e as conversas anteriores, que ja tinham dito ao modelo "o conteudo esta em `uploads/contrato.md`",
+passavam a apontar para o documento errado.
+
+`shortcut:` o sufixo para em 999; acima disso o arquivo e sobrescrito. Para um agente pessoal esse
+teto nunca e alcancado.
 
 Pura estrutura Middleware no App Controller sem vizualizacao fora o Client TG nativo do smartphone do usuario. Apenas havera feedback de actions como envio de texto simulando se o bot realmente ouviu em paralelo a extracao STT.
 
@@ -267,7 +284,13 @@ A pasta `/tmp/` retem temporariamente `.pdf`, `.md`, `.mp3`, `.ogg`, etc.
 
 ## 13. Plano de Rollout
 
-A estrutura do `AudioHandler` acoplada ao Bot Core ficarao em producao local assim que instancializada no App() init() ou acopladas nas rules do `Composer.on("message:voice")`.
+Entregue: texto, voz (whisper local), documentos `.md`/`.pdf`, whitelist por id, os comandos
+`/novo` e `/parar`, e o armazenamento de upload com ponteiro. Coberto por
+`tests/audio-request.test.ts`, `tests/upload-path.test.ts` e `tests/upload-collision.test.ts` - este
+ultimo dispara o handler real registrado por `start()`, com `bot` e `fetch` falsos, e verifica os
+arquivos no disco.
+
+Em aberto: nenhum item de rollout. OCR de PDF escaneado segue fora do escopo (NG-01).
 
 ---
 

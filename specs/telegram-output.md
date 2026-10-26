@@ -90,18 +90,31 @@ Falhas - ver secao de Edge Cases.
 O `TelegramOutputHandler` e o facade que o `AgentController` chama. Ele encapsula o `GrammyContext` e delega para a estrategia correta.
 
 ```typescript
+/** O que de fato saiu para o usuario - nao o que foi pedido. */
+type Delivered = "text" | "voice" | "voice+text" | "error" | "blocked" | "none";
+
 class TelegramOutputHandler {
   private strategies: Map<string, OutputStrategy>;
   private ctx: GrammyContext;
-  private edgeTTS: EdgeTTSProcessor;
   private eventEmitter: EventEmitter;
 
-  constructor(ctx: GrammyContext, config: OutputHandlerConfig);
+  constructor(ctx: GrammyContext, config: OutputHandlerConfig, eventEmitter: EventEmitter);
 
-  async send(conversationId: string, result: AgentLoopResult): Promise<void>;
-  async sendError(conversationId: string, error: Error): Promise<void>;
+  async send(conversationId: string, result: AgentLoopResult): Promise<Delivered>;
+  async sendError(text: string): Promise<void>;
 }
 ```
+
+**Por que `Delivered` existe.** `requiresAudioReply` registra o **pedido**. Quando o edge-tts falha,
+a resposta sai como texto e os dois casos ficam indistinguiveis em qualquer registro posterior - foi
+exatamente o que impediu, por tres rodadas de teste manual, confirmar se a voz funcionava. O valor
+devolvido e gravado no `metadata` da mensagem pelo `AgentController` e logado como
+`[AgentController] delivered: <valor>`.
+
+**`none`** aparece quando o envio e pulado por shutdown em andamento; **`blocked`**, quando o
+usuario bloqueou o bot.
+
+Uma instancia do handler serve **uma** mensagem: ela encapsula o `Context` daquele update.
 
 **Contrato de eventos (EventEmitter):**
 
@@ -119,19 +132,25 @@ O `TelegramOutputHandler` emite eventos para notificar o `AgentController` sobre
 5. Delega `strategy.send(this.ctx, result)`.
 6. Se a estrategia lancar erro 403 "Forbidden", emite `this.eventEmitter.emit("userBlocked", { conversationId })`.
 
-**`sendError(conversationId, error)`:**
-1. Extrai mensagem segura do erro (sem stack traces, paths, ou API keys).
-2. Formata com prefixo de emoji \u26a0\ufe0f.
-3. Envia via `ctx.reply()`.
-4. Nao expoe dados internos.
+**`sendError(text)`:** formata com prefixo `\u26a0\ufe0f` e envia via `ctx.reply()`. Recebe uma
+mensagem ja escrita para o usuario; nao recebe `Error` nem tenta extrair nada de um. Usado pelo
+`AgentController` quando o pipeline falha fora do `AgentLoop`.
 
 ### 8.2 OutputStrategy Interface
 
 ```typescript
 interface OutputStrategy {
-  send(ctx: GrammyContext, result: AgentLoopResult): Promise<void>;
+  send(ctx: GrammyContext, result: AgentLoopResult): Promise<Delivered>;
 }
 ```
+
+Cada estrategia devolve o que entregou, e nao o que lhe pediram:
+
+| Estrategia | Devolve |
+|---|---|
+| `TextOutputStrategy` | sempre `"text"` |
+| `AudioOutputStrategy` | `"voice"`; `"voice+text"` quando a resposta foi abreviada para narrar; `"text"` quando o TTS esta ausente ou falhou |
+| `ErrorOutputStrategy` | sempre `"error"` |
 
 ### 8.3 EdgeTTSProcessor (TTS)
 
@@ -147,12 +166,15 @@ pip install edge-tts
 
 ```typescript
 class EdgeTTSProcessor {
-  constructor(config: { voice: string; tempDir: string });
+  constructor(config: { voice: string; tempDir: string; binary?: string; ffmpegBinary?: string });
 
   async synthesize(text: string): Promise<string>;  // retorna path do arquivo OGG gerado
   async isAvailable(): Promise<boolean>;
 }
 ```
+
+`binary` e `ffmpegBinary` sao configuraveis (`EDGE_TTS_BINARY`, `FFMPEG_BINARY`) pelo mesmo motivo
+do whisper: no Windows o `pip` instala o `edge-tts` fora do `PATH`.
 
 **Error handling:** Se o binario `edge-tts` nao for encontrado, `isAvailable()` retorna `false`. O OutputHandler faz fallback para `TextOutputStrategy`. Se `synthesize()` falhar, o OutputHandler captura e faz fallback para texto com aviso.
 
@@ -203,7 +225,16 @@ Nao existe mais uma `FileOutputStrategy`. Uma heuristica de regex marcava respos
 
 **AudioOutputStrategy:** Sintetiza texto em audio OGG via EdgeTTSProcessor (subprocesso `edge-tts`), envia via `ctx.replyWithVoice()`, e deleta o arquivo temporario. Usado quando `result.requiresAudioReply === true`.
 
-**ErrorOutputStrategy:** Formata erros com prefixo de emoji (`\u26a0\ufe0f`) e envia via `ctx.reply()`. Nunca expoe dados internos (paths, API keys, stack traces) na mensagem ao usuario.
+**ErrorOutputStrategy:** envia o prefixo `\u26a0\ufe0f` seguido da mensagem, nesta ordem de preferencia:
+
+1. `result.finalResponse` - o texto **escrito para o usuario** (ex.: "Desculpe, todos os provedores de IA estao indisponiveis no momento.").
+2. `result.errorMessage` - detalhe cru da API, apenas como ultimo recurso, porque o Telegram recusa texto vazio com `400`.
+
+A ordem importa e ja esteve invertida. A estrategia lia `errorMessage` primeiro e **ignorava
+`finalResponse` por completo**: o usuario recebia
+`\u26a0\ufe0f Erro: xingchen-agi/xing4.0-29b-a4b:free API error: 429 Too Many Requests - {"error":...}`,
+com nome de modelo e JSON cru, enquanto a frase cuidadosamente escrita era codigo morto. O detalhe
+tecnico continua indo para o log, que e onde ele serve.
 
 Componente lida com a visibilidade final no Chat Window do Telegram Mobile e Web.
 

@@ -23,10 +23,11 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 
 ## 3. Goals (Objetivos)
 
-- [ ] G-01: Definir todos os metodos publicos do `MemoryManager` referenciados por outros specs.
-- [ ] G-02: Delegar operacoes aos repositorios internos (`ConversationRepository`, `MessageRepository`) sem expo-los.
-- [ ] G-03: Centralizar logica de truncamento de mensagens (janela de contexto) e limpeza de conversas antigas.
-- [ ] G-04: Gerenciar ciclo de vida da conexao SQLite (inicializar, fechar).
+- [x] G-01: Definir todos os metodos publicos do `MemoryManager` referenciados por outros specs.
+- [x] G-02: Delegar operacoes aos repositorios internos (`ConversationRepository`, `MessageRepository`) sem expo-los.
+- [x] G-03: Centralizar logica de truncamento de mensagens (janela de contexto) e limpeza de conversas antigas.
+- [x] G-04: Gerenciar ciclo de vida da conexao SQLite (inicializar, fechar).
+- [x] G-05: Registrar no `metadata` o que foi entregue ao usuario, nao apenas o que foi pedido.
 
 **Metricas de sucesso:**
 | Metrica | Baseline atual | Target | Prazo |
@@ -63,12 +64,19 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 | RF-02b | `clearMessages(conversationId)` apaga o historico mantendo a linha da conversa, e retorna quantas mensagens removeu. | Must | Apos limpar, `getRecentMessages()` volta vazio e a proxima mensagem salva sem erro. |
 | RF-03 | `getRecentMessages(conversationId)` deve retornar as ultimas `MEMORY_WINDOW_SIZE` mensagens da conversa. | Must | Retorna array com no maximo `MEMORY_WINDOW_SIZE` mensagens, ordenadas por `id` ascendente (ordem de insercao). |
 | RF-04 | `saveMessage(conversationId, role, content, metadata?)` deve persistir mensagem e disparar truncamento se necessario. | Must | Mensagem aparece em `getRecentMessages()`. Se `COUNT > MEMORY_WINDOW_SIZE * 4`, mensagens antigas sao truncadas. |
-| RF-05 | `saveResponse(conversationId, result)` deve persistir a resposta final do AgentLoop. | Must | Resposta aparece no historico. Conteudo acima de 64KB e truncado antes da insercao. |
+| RF-05 | `saveResponse(conversationId, result, delivered?)` deve persistir a resposta final do AgentLoop. | Must | Resposta aparece no historico. Conteudo acima de 64KB e truncado antes da insercao. O `metadata` grava `usage`, `finishReason`, `toolCallsMade`, `iterationsUsed` e `delivered`. |
 | RF-06 | `markConversationBlocked(conversationId)` deve setar `blocked = 1` na conversa. | Must | `isConversationBlocked()` retorna `true` apos chamada. |
 | RF-07 | `isConversationBlocked(conversationId)` deve retornar `true` se a conversa esta bloqueada. | Must | Usado pelo AgentController para descartar mensagens de usuarios bloqueados. |
 | RF-08 | `shutdown()` deve fechar a conexao SQLite graciosamente. | Must | Chamado durante `AgentController.shutdown()`. Nao corrompe o banco. |
 | RF-09 | `truncateOldMessages(conversationId)` deve manter apenas `MEMORY_WINDOW_SIZE` mensagens mais recentes. | Must | Chamado automaticamente apos cada insercao se `COUNT > MEMORY_WINDOW_SIZE * 4`. |
-| RF-10 | `updateConversationTitle(conversationId, title)` deve atualizar o titulo da conversa. | Should | Usado para derivar titulo da primeira mensagem do usuario. |
+| RF-10 | `getRecentMessages()` com `windowSize <= 0` deve devolver vazio, nunca a conversa inteira. | Must | `findByConversationId(id, 0)` retorna `[]`. O ramo "sem LIMIT" e reservado a chamadas sem o argumento. |
+
+**Removidos:** `getConversationsByUser()` e `updateConversationTitle()` existiram no facade e nunca
+tiveram chamador. Foram apagados junto com `findByUserId()`, `updateTitle()`, os campos
+`Conversation.title`/`.provider` e o indice `idx_conversations_user_id` - que custava uma escrita a
+cada mensagem salva, sem nenhuma consulta que o usasse. As colunas `title` e `provider` continuam no
+`CREATE TABLE` de proposito: `CREATE TABLE IF NOT EXISTS` nao altera bancos ja existentes, entao
+remove-las criaria dois formatos de schema em circulacao sem ganho algum.
 
 ### 6.2 Fluxo Principal (Happy Path)
 
@@ -76,7 +84,7 @@ Sem o contrato do MemoryManager, os desenvolvedores nao sabem quais metodos cham
 2. Usuario envia primeira mensagem. AgentController chama `createConversation(userId, conversationId)` passando o id do chat do Telegram. Retorna a `Conversation` com esse id.
 3. AgentController chama `saveMessage(conversationId, 'user', 'Oi agente')`.
 4. AgentController chama `getRecentMessages(conversationId)`. Retorna array com a mensagem recem-persistida.
-5. Apos AgentLoop retornar `AgentLoopResult`, AgentController chama `saveResponse(conversationId, result)`.
+5. Apos o envio ao usuario, AgentController chama `saveResponse(conversationId, result, delivered)` - depois do envio porque `delivered` so existe entao (ver `agent-controller.md` 6.2).
 6. `saveResponse` persiste `role='assistant'` com o conteudo da resposta. Se conteudo > 64KB, trunca.
 7. `saveResponse` verifica `COUNT(messages) > MEMORY_WINDOW_SIZE * 4`. Se sim, chama `truncateOldMessages()`.
 8. No shutdown, AgentController chama `MemoryManager.shutdown()`. Conexao SQLite fechada.
@@ -109,10 +117,8 @@ Ver memory.md secao 7 para os requisitos nao-funcionais de persistencia. MemoryM
 
 ```typescript
 interface Conversation {
-  id: string;
+  id: string;        // o id do chat do Telegram, para a conversa sobreviver a reinicios
   userId: string;
-  title: string;
-  provider: string;
   blocked: number;
   createdAt: string;
   updatedAt: string;
@@ -153,8 +159,6 @@ class MemoryManager {
   // Conversas
   createConversation(userId: string, id?: string): Conversation;
   getConversation(conversationId: string): Conversation | null;
-  getConversationsByUser(userId: string): Conversation[];
-  updateConversationTitle(conversationId: string, title: string): void;
 
   // Mensagens
   saveMessage(
@@ -165,7 +169,7 @@ class MemoryManager {
     toolCallId?: string,
     metadata?: string
   ): Message;
-  saveResponse(conversationId: string, result: AgentLoopResult): void;
+  saveResponse(conversationId: string, result: AgentLoopResult, delivered?: string): void;
   getRecentMessages(conversationId: string): Message[];
   clearMessages(conversationId: string): number;   // /novo - apaga historico, mantem a conversa
 
@@ -189,25 +193,38 @@ class MemoryManager {
 
   async initialize(): Promise<void> {
     if (MemoryManager.dbInstance) {
-      // Reutiliza conexao existente
-      this.db = MemoryManager.dbInstance;
-      return;
+      this.db = MemoryManager.dbInstance;          // reutiliza conexao existente
+    } else {
+      const SQL = await initSqlJs();               // sql.js: SQLite em wasm, em memoria
+      this.db = fs.existsSync(this.dbPath)
+        ? new SQL.Database(fs.readFileSync(this.dbPath))   // carrega o arquivo inteiro
+        : new SQL.Database();
+      this.db.run("PRAGMA foreign_keys=ON;");
+      this.db.run("PRAGMA auto_vacuum=INCREMENTAL;");
+      this.runMigrations();
+      MemoryManager.dbInstance = this.db;
     }
-    this.db = new Database(config.dbPath, { /* WAL, etc */ });
-    MemoryManager.dbInstance = this.db;
-    // ... schema migration, PRAGMA config ...
+    this.conversationRepo = new SqliteConversationRepository(this.db);
+    this.messageRepo = new SqliteMessageRepository(this.db);
+    this.startAutoSave();                          // timer de 5s, ver 8.5
+    this.checkDbSize();
   }
 
   async shutdown(): Promise<void> {
-    if (this.conversationRepo) this.conversationRepo = undefined;
-    if (this.messageRepo) this.messageRepo = undefined;
-    if (this.db) {
-      this.db.close();
-      MemoryManager.dbInstance = null;
-    }
+    this.saveToDisk();        // ANTES da flag: a guarda de saveToDisk aborta com ela ligada
+    this.isShutdown = true;
+    clearInterval(this.saveInterval);
+    this.db.close();
+    MemoryManager.dbInstance = null;
   }
 }
 ```
+
+**Sem `journal_mode=WAL`.** O backend e wasm em memoria; WAL nao faz nada aqui. Persistencia e
+reescrita do arquivo inteiro (8.5).
+
+**Banco corrompido:** se `new SQL.Database(buffer)` lanca, o arquivo e copiado para `<dbPath>.bak`
+e um banco vazio e criado. O boot prossegue com warning em vez de abortar.
 
 **Contrato:**
 - `dbInstance` e estatica e privada. Apenas `MemoryManager` gerencia seu ciclo de vida.
@@ -225,8 +242,8 @@ exportar o banco inteiro e reescrever o arquivo - nao ha escrita incremental.
 mudou. Sem isso, um banco de ate `DB_MAX_SIZE_MB` (padrao 500) seria serializado e reescrito a cada
 5 segundos mesmo com o bot ocioso.
 
-Marcam o banco como sujo: `saveMessage()`, `createConversation()`, `updateConversationTitle()`,
-`markConversationBlocked()`, `clearMessages()` e **`runMigrations()`**.
+Marcam o banco como sujo: `saveMessage()`, `createConversation()`, `markConversationBlocked()`,
+`clearMessages()`, `checkDbSize()` quando compacta, e **`runMigrations()`**.
 
 **Migracoes contam como escrita.** Se `runMigrations()` nao marcar sujeira, o novo schema existe
 apenas em memoria: o arquivo mantem o schema antigo, a migracao reexecuta a cada boot, e so e
@@ -235,6 +252,14 @@ persistida quando alguma escrita de linha nao relacionada acontece.
 **Ordem no shutdown:** `saveToDisk()` roda **antes** de `isShutdown = true`, porque a propria
 guarda de `saveToDisk()` aborta quando essa flag esta ligada. Inverter a ordem faz todo shutdown
 limpo descartar as mudancas pendentes.
+
+**Checagem de tamanho a cada gravacao.** `saveToDisk()` chama `checkDbSize()` logo apos escrever,
+quando o tamanho em disco e o real. Se passar de `DB_MAX_SIZE_MB`, roda `VACUUM` e marca sujo - o
+proximo autosave grava o banco compactado. `checkDbSize()` **nao** chama `saveToDisk()`: seria
+recursao, e o `dirty` recem-zerado faria a chamada interna nao gravar nada.
+
+Antes a checagem rodava **apenas no boot**, entao o limite configurado nunca valia durante o uso -
+um banco podia crescer indefinidamente ate o proximo restart.
 
 ---
 
@@ -264,7 +289,8 @@ MemoryManager nao define schema proprio. O schema SQLite esta documentado em `me
 | EC-03: Conteudo com null bytes | Mensagem contem `\u0000`. | `saveMessage()` aplica `content.replace(/\u0000/g, '')` antes de inserir. |
 | EC-04: Conteudo excede 64KB | Resposta do LLM > 65536 bytes. | Truncado para 65536 bytes (UTF-8) antes da insercao. Warning logado. |
 | EC-05: Vacuum periodico | Contador de insercoes atinge 500. | `PRAGMA incremental_vacuum` executado. Contador resetado. |
-| EC-06: DB excede tamanho maximo | Arquivo `.db` > `DB_MAX_SIZE_MB` na inicializacao. | `VACUUM` completo executado. Warning logado. |
+| EC-06: DB excede tamanho maximo | Arquivo `.db` > `DB_MAX_SIZE_MB`, verificado no boot **e a cada gravacao em disco**. | `VACUUM` completo executado, banco marcado como sujo. Warning logado. |
+| EC-08: `windowSize` zero ou negativo | `MEMORY_WINDOW_SIZE=0` no `.env`. | Nao chega mais ao MemoryManager: `validateConfig()` recusa valores `< 1` (ver `configuration.md` 3). Se chegasse, `saveMessage()` dispararia `deleteOldMessages(id, 0)` - cujo `LIMIT 0` **apaga a conversa inteira** a cada mensagem salva. Perda de dados, nao janela vazia. |
 | EC-07: Operacao apos shutdown | Chamada a qualquer metodo publico apos `shutdown()`. | Lanca erro: `"MemoryManager is shut down."` Um flag interno `isShutdown` controla isso - setado como `true` no inicio de `shutdown()` e verificado no inicio de cada metodo publico. Este guard previne comportamento indefinido durante race conditions entre shutdown e mensagens em voo. |
 ---
 
@@ -278,12 +304,8 @@ MemoryManager nao define schema proprio. O schema SQLite esta documentado em `me
 
 ## 13. Plano de Rollout
 
-1. Implementar `MemoryManager` com `initialize()` e `shutdown()`.
-2. Adicionar `createConversation()`, `saveMessage()` e `clearMessages()`.
-3. Adicionar `getRecentMessages()` com `MEMORY_WINDOW_SIZE`.
-4. Adicionar `saveResponse()` com truncamento de 64KB.
-5. Adicionar `markConversationBlocked()` e `isConversationBlocked()`.
-6. Adicionar `truncateOldMessages()` e vacuum periodico.
+Entregue por completo. Coberto por `tests/memory.test.ts` e `tests/memory-window.test.ts` (janela,
+limite zero, validacao de config e limite de tamanho fora do boot).
 
 ---
 
