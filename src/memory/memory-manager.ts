@@ -89,7 +89,7 @@ export class MemoryManager {
 
     this.startAutoSave();
 
-    await this.checkDbSize();
+    this.checkDbSize();
   }
 
   private startAutoSave(): void {
@@ -105,6 +105,9 @@ export class MemoryManager {
       const buffer = Buffer.from(data);
       fs.writeFileSync(this.dbPath, buffer);
       this.dirty = false;
+      // o arquivo acabou de ser escrito, entao o tamanho em disco e o real.
+      // Antes isso so era checado no boot e o limite nunca valia durante o uso.
+      this.checkDbSize();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[MemoryManager] Failed to save database: ${msg}`);
@@ -153,8 +156,9 @@ export class MemoryManager {
       )
     `);
 
-    this.db.run("CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)");
     this.db.run("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)");
+    // nenhuma consulta busca conversa por usuario; o indice so custava uma escrita a mais
+    this.db.run("DROP INDEX IF EXISTS idx_conversations_user_id");
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS messages (
@@ -180,14 +184,15 @@ export class MemoryManager {
     this.db.run("DROP INDEX IF EXISTS idx_messages_role");
   }
 
-  private async checkDbSize(): Promise<void> {
+  private checkDbSize(): void {
     if (!fs.existsSync(this.dbPath)) return;
     const stat = fs.statSync(this.dbPath);
     const sizeMb = stat.size / (1024 * 1024);
     if (sizeMb > this.dbMaxSizeMb) {
       console.warn(`[MemoryManager] Database size ${sizeMb.toFixed(1)}MB exceeds limit ${this.dbMaxSizeMb}MB. Running VACUUM.`);
       this.db.run("VACUUM");
-      this.saveToDisk();
+      // marcar sujo em vez de gravar aqui: saveToDisk() e quem chama este metodo
+      this.dirty = true;
     }
   }
 
@@ -224,17 +229,6 @@ export class MemoryManager {
     return this.conversationRepo.findById(conversationId);
   }
 
-  getConversationsByUser(userId: string): Conversation[] {
-    this.ensureInitialized();
-    return this.conversationRepo.findByUserId(userId);
-  }
-
-  updateConversationTitle(conversationId: string, title: string): void {
-    this.dirty = true;
-    this.ensureInitialized();
-    this.conversationRepo.updateTitle(conversationId, title);
-  }
-
   saveMessage(
     conversationId: string,
     role: "user" | "assistant" | "system" | "tool",
@@ -257,12 +251,14 @@ export class MemoryManager {
     return msg;
   }
 
-  saveResponse(conversationId: string, result: AgentLoopResult): void {
+  saveResponse(conversationId: string, result: AgentLoopResult, delivered?: string): void {
     this.ensureInitialized();
     const metadata: Record<string, unknown> = {};
     if (result.usage) {
       metadata.usage = result.usage;
     }
+    // o que de fato chegou ao usuario: "voice", "text", "voice+text", "error"...
+    if (delivered) metadata.delivered = delivered;
     metadata.finishReason = result.finishReason;
     metadata.toolCallsMade = result.toolCallsMade;
     metadata.iterationsUsed = result.iterationsUsed;

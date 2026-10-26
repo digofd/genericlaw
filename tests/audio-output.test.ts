@@ -159,3 +159,27 @@ describe("AudioOutputStrategy", () => {
     expect(ctx.replies).toEqual(["(resposta vazia)"]);
   });
 });
+
+describe("o que foi entregue, nao o que foi pedido", () => {
+  it("informa voice quando o audio sai", async () => {
+    const ctx = new FakeContext();
+    const entregue = await new AudioOutputStrategy(asTts(new FakeTts())).send(asCtx(ctx), result("oi"));
+    expect(entregue).toBe("voice");
+    expect(ctx.voices).toHaveLength(1);
+  });
+
+  it("informa text quando o edge-tts falha, ainda que o pedido fosse audio", async () => {
+    const ctx = new FakeContext();
+    const entregue = await new AudioOutputStrategy(asTts(new FakeTts({ fail: true }))).send(asCtx(ctx), result("oi"));
+    // o pedido era audio: so o valor entregue distingue este caso do de cima
+    expect(entregue).toBe("text");
+    expect(ctx.voices).toHaveLength(0);
+    expect(ctx.replies).toHaveLength(1);
+  });
+
+  it("informa voice+text quando a resposta longa e narrada em parte", async () => {
+    const ctx = new FakeContext();
+    const entregue = await new AudioOutputStrategy(asTts(new FakeTts())).send(asCtx(ctx), result("x".repeat(2500)));
+    expect(entregue).toBe("voice+text");
+  });
+});

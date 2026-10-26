@@ -12,18 +12,24 @@ const CHUNK_SIZE = 4000;
 // a resposta completa vai em seguida como texto.
 const TTS_MAX_CHARS = 2000;
 
+/**
+ * O que de fato saiu para o usuario. Pedir audio nao e receber audio: quando o
+ * edge-tts falha a resposta vira texto, e so este valor distingue os dois casos.
+ */
+export type Delivered = "text" | "voice" | "voice+text" | "error" | "blocked" | "none";
+
 export interface OutputStrategy {
-  send(ctx: Context, result: AgentLoopResult): Promise<void>;
+  send(ctx: Context, result: AgentLoopResult): Promise<Delivered>;
 }
 
 export class TextOutputStrategy implements OutputStrategy {
-  async send(ctx: Context, result: AgentLoopResult): Promise<void> {
+  async send(ctx: Context, result: AgentLoopResult): Promise<Delivered> {
     // o Telegram recusa texto vazio com 400; nunca deixar um chegar na API
     const text = result.finalResponse?.trim() || "(resposta vazia)";
 
     if (text.length <= CHUNK_SIZE) {
       await ctx.reply(text);
-      return;
+      return "text";
     }
 
     const chunks: string[] = [];
@@ -34,6 +40,7 @@ export class TextOutputStrategy implements OutputStrategy {
     for (const chunk of chunks) {
       await ctx.reply(chunk);
     }
+    return "text";
   }
 }
 
@@ -47,12 +54,11 @@ export class AudioOutputStrategy implements OutputStrategy {
     this.tts = tts;
   }
 
-  async send(ctx: Context, result: AgentLoopResult): Promise<void> {
+  async send(ctx: Context, result: AgentLoopResult): Promise<Delivered> {
     try {
       const available = await this.tts.isAvailable();
       if (!available) {
-        await this.text.send(ctx, result);
-        return;
+        return this.text.send(ctx, result);
       }
 
       const full = result.finalResponse;
@@ -73,21 +79,29 @@ export class AudioOutputStrategy implements OutputStrategy {
       }
 
       // nada se perde quando a resposta era longa demais para narrar
-      if (abbreviated) await this.text.send(ctx, result);
+      if (abbreviated) {
+        await this.text.send(ctx, result);
+        return "voice+text";
+      }
+      return "voice";
     } catch (err: unknown) {
       // cair para texto e o certo, mas fazer isso em silencio escondia um pipeline de
       // audio quebrado atras do que parecia uma resposta normal
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[AudioOutputStrategy] Voice reply failed, sending text instead: ${msg}`);
-      await this.text.send(ctx, result);
+      return this.text.send(ctx, result);
     }
   }
 }
 
 export class ErrorOutputStrategy implements OutputStrategy {
-  async send(ctx: Context, result: AgentLoopResult): Promise<void> {
-    const msg = result.errorMessage || "Ocorreu um erro inesperado.";
-    await ctx.reply(`\u26a0\ufe0f Erro: ${msg}`);
+  async send(ctx: Context, result: AgentLoopResult): Promise<Delivered> {
+    // a mensagem escrita para o usuario vem primeiro; errorMessage e detalhe de API,
+    // util no log e nao no chat. So vale como ultimo recurso porque o Telegram
+    // recusa texto vazio com 400.
+    const msg = result.finalResponse?.trim() || result.errorMessage || "Ocorreu um erro inesperado.";
+    await ctx.reply(`\u26a0\ufe0f ${msg}`);
+    return "error";
   }
 }
 
@@ -113,7 +127,7 @@ export class TelegramOutputHandler {
     this.strategies.set("error", new ErrorOutputStrategy());
   }
 
-  async send(conversationId: string, result: AgentLoopResult): Promise<void> {
+  async send(conversationId: string, result: AgentLoopResult): Promise<Delivered> {
     let strategy: OutputStrategy;
 
     if (result.finishReason === "error") {
@@ -125,30 +139,14 @@ export class TelegramOutputHandler {
     }
 
     try {
-      await strategy.send(this.ctx, result);
+      return await strategy.send(this.ctx, result);
     } catch (err: unknown) {
       const e = err instanceof Error ? err : new Error(String(err));
       if (e.message.includes("403") || e.message.includes("Forbidden") || e.message.includes("blocked")) {
         this.eventEmitter.emit("userBlocked", { conversationId });
-        return;
+        return "blocked";
       }
       throw e;
-    }
-  }
-
-  async sendReply(text: string): Promise<void> {
-    if (text.length <= CHUNK_SIZE) {
-      await this.ctx.reply(text);
-      return;
-    }
-
-    const chunks: string[] = [];
-    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-      chunks.push(text.slice(i, i + CHUNK_SIZE));
-    }
-
-    for (const chunk of chunks) {
-      await this.ctx.reply(chunk);
     }
   }
 

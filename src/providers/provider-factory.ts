@@ -1,9 +1,7 @@
 import type { ILlmProvider, LlmMessage, LlmResponse } from "./types.js";
 import type { ToolDefinition } from "../tools/registry.js";
 import { GeminiProvider } from "./gemini-provider.js";
-import { DeepSeekProvider } from "./deepseek-provider.js";
-import { GroqProvider } from "./groq-provider.js";
-import { OpenRouterProvider } from "./openrouter-provider.js";
+import { OpenAiCompatProvider, DIRECT_PRESETS, openRouterProvider } from "./openai-compat-provider.js";
 
 export class ProviderFactory {
   private providers: Map<string, ILlmProvider> = new Map();
@@ -21,12 +19,8 @@ export class ProviderFactory {
   }
 
   createWithFallback(names: string[]): ILlmProvider {
-    const fallbackProviders = names.map((n) => this.create(n));
-    if (fallbackProviders.length === 0) {
-      throw new Error("No providers configured.");
-    }
-
-    return new FallbackProvider(fallbackProviders);
+    // create() ja lanca para nome desconhecido, entao a lista nunca chega vazia aqui
+    return new FallbackProvider(names.map((n) => this.create(n)));
   }
 
   getNames(): string[] {
@@ -49,49 +43,31 @@ export class ProviderFactory {
 
     const useOpenRouter = !!config.openRouterApiKey;
 
-    if (useOpenRouter) {
-      for (const name of allProviders) {
-        if (seen.has(name)) continue;
-        seen.add(name);
-
-        const provider = new OpenRouterProvider({
-          name,
-          apiKey: config.openRouterApiKey!,
-          timeoutMs: config.timeoutMs,
-          retryCount: config.retryCount,
-          retryBaseDelayMs: config.retryBaseDelayMs,
-        });
-        factory.register(name, provider);
-      }
-      return factory;
-    }
-
     for (const name of allProviders) {
       if (seen.has(name)) continue;
       seen.add(name);
 
-      const apiKey = config.apiKeys[name];
-      if (!apiKey) continue;
-
-      const providerConfig = {
-        apiKey,
+      const retries = {
         timeoutMs: config.timeoutMs,
         retryCount: config.retryCount,
         retryBaseDelayMs: config.retryBaseDelayMs,
       };
 
-      switch (name) {
-        case "gemini":
-          factory.register(name, new GeminiProvider(providerConfig));
-          break;
-        case "deepseek":
-          factory.register(name, new DeepSeekProvider(providerConfig));
-          break;
-        case "groq":
-          factory.register(name, new GroqProvider(providerConfig));
-          break;
-        default:
-          console.warn(`[ProviderFactory] Unknown provider '${name}', skipping.`);
+      if (useOpenRouter) {
+        factory.register(name, openRouterProvider({ name, apiKey: config.openRouterApiKey!, ...retries }));
+        continue;
+      }
+
+      const apiKey = config.apiKeys[name];
+      if (!apiKey) continue;
+
+      const preset = DIRECT_PRESETS[name];
+      if (preset) {
+        factory.register(name, new OpenAiCompatProvider({ name, apiKey, ...preset, ...retries }));
+      } else if (name === "gemini") {
+        factory.register(name, new GeminiProvider({ apiKey, ...retries }));
+      } else {
+        console.warn(`[ProviderFactory] Unknown provider '${name}', skipping.`);
       }
     }
 

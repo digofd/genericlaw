@@ -15,20 +15,28 @@ Regras:
 7. Nunca invente resultados de ferramentas — execute-as primeiro.
 8. Você PODE responder em áudio. Quando o usuário pedir áudio ou voz, apenas escreva a resposta normalmente: o sistema converte o texto em voz automaticamente. Nunca diga que não consegue gerar áudio e nunca sugira ferramentas externas de TTS.`;
 
-/** Renderizacao compacta e segura dos argumentos de tool: strings longas viram um tamanho. */
-function describeArgs(args: Record<string, unknown>): string {
+/**
+ * Renderizacao compacta e segura dos argumentos de tool: strings longas viram um tamanho.
+ * Com logMessageContent desligado nenhuma string sai literal - e o que a flag promete.
+ */
+function describeArgs(args: Record<string, unknown>, logMessageContent: boolean): string {
   return Object.entries(args)
-    .map(([k, v]) => `${k}=${typeof v === "string" && v.length > 80 ? `<${v.length} chars>` : JSON.stringify(v)}`)
+    .map(([k, v]) => {
+      const ocultar = typeof v === "string" && (!logMessageContent || v.length > 80);
+      return `${k}=${ocultar ? `<${(v as string).length} chars>` : JSON.stringify(v)}`;
+    })
     .join(", ");
 }
 
 export class AgentLoop {
   private maxIterations: number;
   private toolTimeoutMs: number;
+  private logMessageContent: boolean;
 
-  constructor(config: { maxIterations: number; toolTimeoutMs: number }) {
+  constructor(config: { maxIterations: number; toolTimeoutMs: number; logMessageContent?: boolean }) {
     this.maxIterations = config.maxIterations;
     this.toolTimeoutMs = config.toolTimeoutMs;
+    this.logMessageContent = config.logMessageContent ?? false;
   }
 
   getBaseSystemPrompt(): string {
@@ -100,6 +108,8 @@ export class AgentLoop {
         conversationMessages.push({
           role: "assistant",
           content: response.text || `Calling tool: ${toolCall.name}`,
+          // sem isto o resultado abaixo vira um role=tool orfao e a API recusa com 400
+          toolCalls: [toolCall],
         });
 
         const key = `${toolCall.name}:${JSON.stringify(toolCall.arguments)}`;
@@ -125,7 +135,7 @@ export class AgentLoop {
         });
 
         console.info(
-          `[AgentLoop] Tool ${toolCall.name}(${describeArgs(toolCall.arguments)}) executed: ${toolResult.success ? "success" : "failure"}`
+          `[AgentLoop] Tool ${toolCall.name}(${describeArgs(toolCall.arguments, this.logMessageContent)}) executed: ${toolResult.success ? "success" : "failure"}`
         );
         continue;
       }

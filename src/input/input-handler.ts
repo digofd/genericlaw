@@ -4,7 +4,9 @@ import type { AppConfig } from "../config.js";
 import type { ProcessedInput } from "./types.js";
 import { WhisperProcessor } from "./whisper-processor.js";
 import { CriarArquivoTool } from "../tools/criar-arquivo.js";
+import { resolveInWorkspace } from "../tools/registry.js";
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
@@ -24,11 +26,28 @@ export function wantsAudioReply(text: string): boolean {
 
 const UPLOAD_PREVIEW_CHARS = 500;
 
-/** Destino, relativo ao workspace, de um documento enviado. Exportado para testes. */
-export function uploadPathFor(fileName: string, isPdf: boolean): string {
+/**
+ * Destino, relativo ao workspace, de um documento enviado. Exportado para testes.
+ * `existe` desvia para nome-2.md, nome-3.md: dois envios com o mesmo nome apagavam
+ * o primeiro, e as conversas anteriores passavam a apontar para o documento errado.
+ */
+export function uploadPathFor(
+  fileName: string,
+  isPdf: boolean,
+  existe: (relPath: string) => boolean = () => false
+): string {
   const base = path.basename(fileName).replace(/[^\w.\- ]+/g, "_").trim();
   const safe = base && base !== "." ? base : "documento";
-  return isPdf ? `uploads/${safe.replace(/\.pdf$/i, "")}.md` : `uploads/${safe}`;
+  const nome = isPdf ? `${safe.replace(/\.pdf$/i, "")}.md` : safe;
+
+  const ext = path.extname(nome);
+  const semExt = nome.slice(0, nome.length - ext.length);
+
+  let rel = `uploads/${nome}`;
+  // shortcut: para em 999 copias do mesmo nome e sobrescreve; subir o teto se alguem
+  // chegar la, o que para um agente pessoal nao acontece
+  for (let n = 2; existe(rel) && n < 1000; n++) rel = `uploads/${semExt}-${n}${ext}`;
+  return rel;
 }
 
 export class TelegramInputHandler {
@@ -244,7 +263,10 @@ export class TelegramInputHandler {
 
       // Guarda o documento e entrega um ponteiro ao modelo, nao o texto inteiro:
       // embutido, ele seria reenviado como contexto (ate 64KB) em todos os turnos seguintes.
-      const relPath = uploadPathFor(fileName || `documento.${ext}`, isPdf);
+      const relPath = uploadPathFor(fileName || `documento.${ext}`, isPdf, (rel) => {
+        const abs = resolveInWorkspace(this.workspaceRoot, rel);
+        return abs !== null && fs.existsSync(abs);
+      });
       const saved = await new CriarArquivoTool(this.workspaceRoot).execute({ path: relPath, content: text, overwrite: true });
 
       let content: string;
@@ -277,7 +299,9 @@ export class TelegramInputHandler {
     const file = await this.bot.api.getFile(fileId);
     const url = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
 
-    const outputPath = path.resolve(this.tmpDir, `download-${Date.now()}.${ext}`);
+    // Date.now() colidia entre dois envios no mesmo milissegundo, e o segundo
+    // sobrescrevia o temporario do primeiro antes de ele ser lido
+    const outputPath = path.resolve(this.tmpDir, `download-${randomUUID()}.${ext}`);
 
     const response = await fetch(url);
     if (!response.ok) {

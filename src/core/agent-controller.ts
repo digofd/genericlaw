@@ -4,6 +4,7 @@ import { AgentLoop } from "./agent-loop.js";
 import { SkillRouter, SkillLoader } from "../skills/index.js";
 import type { SkillManifest } from "../skills/index.js";
 import { TelegramOutputHandler } from "../output/output-handler.js";
+import type { Delivered } from "../output/output-handler.js";
 import { ProviderFactory } from "../providers/provider-factory.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { ILlmProvider, LlmMessage } from "../providers/types.js";
@@ -77,13 +78,18 @@ export class AgentController {
     const selfCheck = { current: undefined as Promise<void> | undefined };
     const promise = (async () => {
       if (existingPromise) {
+        // sem o clearTimeout, cada mensagem enfileirada segurava o event loop por
+        // 5 minutos depois de o trabalho ja ter terminado
+        let stallTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const timeout = new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error("STALL")), STALL_TIMEOUT_MS)
-          );
+          const timeout = new Promise<void>((_, reject) => {
+            stallTimer = setTimeout(() => reject(new Error("STALL")), STALL_TIMEOUT_MS);
+          });
           await Promise.race([existingPromise, timeout]);
         } catch {
           console.warn(`[AgentController] Previous message stall detected for conversation ${conversationId}.`);
+        } finally {
+          clearTimeout(stallTimer);
         }
       }
 
@@ -179,13 +185,18 @@ export class AgentController {
       result.conversationId = conversationId;
       result.requiresAudioReply = requiresAudioReply;
 
-      this.memoryManager.saveResponse(conversationId, result);
-
-      console.info(`[AgentController] memory -> output`);
-
-      if (this.isShuttingDown) return;
-
-      await outputHandler.send(conversationId, result);
+      // o metadata registra o que saiu, nao o que foi pedido: um pedido de audio
+      // que cai para texto ficaria indistinguivel de um audio entregue.
+      // O finally garante que a resposta e salva mesmo se o envio falhar.
+      let delivered: Delivered = "none";
+      try {
+        if (!this.isShuttingDown) {
+          delivered = await outputHandler.send(conversationId, result);
+        }
+      } finally {
+        this.memoryManager.saveResponse(conversationId, result, delivered);
+        console.info(`[AgentController] delivered: ${delivered}`);
+      }
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

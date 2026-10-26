@@ -4,6 +4,7 @@ export interface LlmMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   toolCallId?: string;
+  toolCalls?: ToolCall[];
   name?: string;
 }
 
@@ -34,6 +35,26 @@ export interface ILlmProvider {
 /** ToolDefinition ja tem o formato `function` da OpenAI, entao isto e so o involucro. */
 export function toOpenAiTools(tools: ToolDefinition[]): Record<string, unknown>[] {
   return tools.map((t) => ({ type: "function", function: t }));
+}
+
+/**
+ * A API recusa com 400 uma mensagem role=tool que nao responda a um assistant
+ * anterior com `tool_calls`, entao o par precisa atravessar inteiro ate o corpo.
+ */
+export function toOpenAiMessages(messages: LlmMessage[]): Record<string, unknown>[] {
+  return messages.map((m) => {
+    const entry: Record<string, unknown> = { role: m.role, content: m.content };
+    if (m.toolCallId) entry.tool_call_id = m.toolCallId;
+    if (m.name) entry.name = m.name;
+    if (m.toolCalls?.length) {
+      entry.tool_calls = m.toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+      }));
+    }
+    return entry;
+  });
 }
 
 export async function withRetry<T>(

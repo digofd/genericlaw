@@ -2,7 +2,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "crypto";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,7 +27,7 @@ export class EdgeTTSProcessor {
 
     // o edge-tts emite MP3 independente da extensao de saida, e o sendVoice do
     // Telegram so aceita OGG/Opus - um MP3 chamado .ogg e recusado.
-    const id = uuidv4();
+    const id = randomUUID();
     const mp3Path = path.resolve(this.tempDir, `tts-${id}.mp3`);
     const outputPath = path.resolve(this.tempDir, `tts-${id}.ogg`);
     const textPath = path.resolve(this.tempDir, `tts-${id}.txt`);

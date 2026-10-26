@@ -51,10 +51,18 @@ export interface AppConfig {
   };
 }
 
-function parseNumber(raw: string | undefined, key: string, fallback: number, invalidKeys: string[]): number {
+// min existe porque zero e negativo passavam na validacao e quebravam em runtime:
+// MEMORY_WINDOW_SIZE=0 apaga o historico a cada mensagem, MAX_ITERATIONS=0 nunca roda o agente.
+function parseNumber(
+  raw: string | undefined,
+  key: string,
+  fallback: number,
+  invalidKeys: string[],
+  min = 1
+): number {
   if (raw === undefined) return fallback;
   const parsed = parseInt(raw, 10);
-  if (isNaN(parsed)) {
+  if (isNaN(parsed) || parsed < min) {
     invalidKeys.push(key);
     return fallback;
   }
@@ -96,8 +104,9 @@ export function validateConfig(raw: Record<string, string | undefined>): AppConf
 
   const _maxIterations = parseNumber(raw.MAX_ITERATIONS, "MAX_ITERATIONS", 5, invalidKeys);
   const _llmTimeoutMs = parseNumber(raw.LLM_TIMEOUT_MS, "LLM_TIMEOUT_MS", 120000, invalidKeys);
-  const _llmRetryCount = parseNumber(raw.LLM_RETRY_COUNT, "LLM_RETRY_COUNT", 3, invalidKeys);
-  const _llmRetryBaseDelayMs = parseNumber(raw.LLM_RETRY_BASE_DELAY_MS, "LLM_RETRY_BASE_DELAY_MS", 1000, invalidKeys);
+  // os dois de retry aceitam 0: "nao tentar de novo" e "sem espera" sao pedidos validos
+  const _llmRetryCount = parseNumber(raw.LLM_RETRY_COUNT, "LLM_RETRY_COUNT", 3, invalidKeys, 0);
+  const _llmRetryBaseDelayMs = parseNumber(raw.LLM_RETRY_BASE_DELAY_MS, "LLM_RETRY_BASE_DELAY_MS", 1000, invalidKeys, 0);
   const _toolTimeoutMs = parseNumber(raw.TOOL_TIMEOUT_MS, "TOOL_TIMEOUT_MS", 30000, invalidKeys);
   const _windowSize = parseNumber(raw.MEMORY_WINDOW_SIZE, "MEMORY_WINDOW_SIZE", 20, invalidKeys);
   const _dbMaxSizeMb = parseNumber(raw.DB_MAX_SIZE_MB, "DB_MAX_SIZE_MB", 500, invalidKeys);
@@ -171,21 +180,4 @@ export function validateConfig(raw: Record<string, string | undefined>): AppConf
   };
 
   return Object.freeze(config) as AppConfig;
-}
-
-let _config: AppConfig | null = null;
-
-export function getConfig(): AppConfig {
-  if (!_config) {
-    throw new ConfigError("Config not initialized. Call validateConfig first.", [], []);
-  }
-  return _config;
-}
-
-export function setConfig(config: AppConfig): void {
-  _config = Object.freeze(config) as AppConfig;
-}
-
-export function resetConfig(): void {
-  _config = null;
 }

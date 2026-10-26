@@ -3,7 +3,7 @@ import fs from "fs";
 import { Bot } from "grammy";
 import { execFile } from "child_process";
 import { EventEmitter } from "events";
-import { validateConfig, setConfig, ConfigError } from "./config.js";
+import { validateConfig, ConfigError } from "./config.js";
 import type { AppConfig } from "./config.js";
 import { MemoryManager } from "./memory/memory-manager.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -54,7 +54,33 @@ async function main(): Promise<void> {
     }
     process.exit(1);
   }
-  setConfig(config);
+  // antes da rede: um provider sem chave so falha na primeira mensagem, e ate la
+  // o bot parece saudavel. Barato de checar aqui, caro de descobrir no chat.
+  const providerFactory = ProviderFactory.createFromConfig({
+    primaryProvider: config.llm.primaryProvider,
+    fallbackProviders: config.llm.fallbackProviders,
+    apiKeys: config.llm.apiKeys,
+    openRouterApiKey: config.llm.openRouterApiKey,
+    timeoutMs: config.agent.llmTimeoutMs,
+    retryCount: config.agent.llmRetryCount,
+    retryBaseDelayMs: config.agent.llmRetryBaseDelayMs,
+  });
+
+  const configured = [config.llm.primaryProvider, ...config.llm.fallbackProviders];
+  const missing = configured.filter((name) => !providerFactory.getNames().includes(name));
+  if (missing.length > 0) {
+    console.error(
+      `[Bootstrap] No usable LLM provider for: ${missing.join(", ")}.\n` +
+      `Defina OPENROUTER_API_KEY, ou a chave propria de cada provedor (GEMINI_API_KEY, DEEPSEEK_API_KEY, GROQ_API_KEY).`
+    );
+    process.exit(1);
+  }
+  console.info(`[Bootstrap] Providers registered: ${providerFactory.getNames().join(", ")}`);
+
+  // ./data sai daqui: o MemoryManager ja cria o diretorio do dbPath configurado
+  for (const dir of [config.filesystem.workspaceRoot, config.filesystem.tmpDir, config.filesystem.skillsDir]) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  }
 
   const bot = new Bot(config.telegram.botToken);
 
@@ -82,11 +108,6 @@ async function main(): Promise<void> {
     console.warn("[Bootstrap] whisper not found — voice input disabled.");
   }
 
-  if (!fs.existsSync("./output")) fs.mkdirSync("./output", { recursive: true });
-  if (!fs.existsSync("./data")) fs.mkdirSync("./data", { recursive: true });
-  if (!fs.existsSync(config.filesystem.tmpDir)) fs.mkdirSync(config.filesystem.tmpDir, { recursive: true });
-  if (!fs.existsSync(config.filesystem.skillsDir)) fs.mkdirSync(config.filesystem.skillsDir, { recursive: true });
-
   const memoryManager = new MemoryManager({
     dbPath: config.memory.dbPath,
     windowSize: config.memory.windowSize,
@@ -107,17 +128,6 @@ async function main(): Promise<void> {
   toolRegistry.register(new ListarArquivosTool(config.filesystem.workspaceRoot));
   console.info("[Bootstrap] Tools registered.");
 
-  const providerFactory = ProviderFactory.createFromConfig({
-    primaryProvider: config.llm.primaryProvider,
-    fallbackProviders: config.llm.fallbackProviders,
-    apiKeys: config.llm.apiKeys,
-    openRouterApiKey: config.llm.openRouterApiKey,
-    timeoutMs: config.agent.llmTimeoutMs,
-    retryCount: config.agent.llmRetryCount,
-    retryBaseDelayMs: config.agent.llmRetryBaseDelayMs,
-  });
-  console.info("[Bootstrap] Providers registered.");
-
   const skillLoader = new SkillLoader(config.filesystem.skillsDir, toolRegistry);
   const skills = skillLoader.loadAll();
   console.info(`[Bootstrap] Loaded ${skills.length} skills.`);
@@ -128,6 +138,7 @@ async function main(): Promise<void> {
   const agentLoop = new AgentLoop({
     maxIterations: config.agent.maxIterations,
     toolTimeoutMs: config.agent.toolTimeoutMs,
+    logMessageContent: config.logging.logMessageContent,
   });
   console.info("[Bootstrap] AgentLoop ready.");
 
