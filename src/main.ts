@@ -8,6 +8,9 @@ import type { AppConfig } from "./config.js";
 import { MemoryManager } from "./memory/memory-manager.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { CriarArquivoTool, LerArquivoTool, ListarArquivosTool } from "./tools/index.js";
+import { HistoricoGrupoTool } from "./tools/historico-grupo.js";
+import { TelegramGroupWatcher } from "./input/group-watcher.js";
+import { destilarGrupos } from "./knowledge/distiller.js";
 import { ProviderFactory } from "./providers/provider-factory.js";
 import { SkillLoader, SkillRouter } from "./skills/index.js";
 import { AgentLoop } from "./core/agent-loop.js";
@@ -60,6 +63,7 @@ async function main(): Promise<void> {
     primaryProvider: config.llm.primaryProvider,
     fallbackProviders: config.llm.fallbackProviders,
     apiKeys: config.llm.apiKeys,
+    models: config.llm.models,
     openRouterApiKey: config.llm.openRouterApiKey,
     timeoutMs: config.agent.llmTimeoutMs,
     retryCount: config.agent.llmRetryCount,
@@ -126,6 +130,11 @@ async function main(): Promise<void> {
   toolRegistry.register(new CriarArquivoTool(config.filesystem.workspaceRoot));
   toolRegistry.register(new LerArquivoTool(config.filesystem.workspaceRoot));
   toolRegistry.register(new ListarArquivosTool(config.filesystem.workspaceRoot));
+  // so existe se a leitura de grupos estiver configurada: sem o coletor a ferramenta
+  // sempre responderia "nenhum grupo", gastando um turno do modelo para nada
+  if (config.groups) {
+    toolRegistry.register(new HistoricoGrupoTool(memoryManager));
+  }
   console.info("[Bootstrap] Tools registered.");
 
   const skillLoader = new SkillLoader(config.filesystem.skillsDir, toolRegistry);
@@ -165,6 +174,7 @@ async function main(): Promise<void> {
     onShutdown: () => shutdown(),
   });
 
+  let groupWatcher: TelegramGroupWatcher | null = null;
   let isShuttingDown = false;
 
   async function shutdown(): Promise<void> {
@@ -182,6 +192,12 @@ async function main(): Promise<void> {
       await inputHandler.stop();
       console.info("[Bootstrap] Bot polling stopped.");
 
+      if (groupWatcher) {
+        // nao pode abortar o shutdown: o MemoryManager ainda precisa gravar em disco abaixo
+        await groupWatcher.stop().catch((err) => console.error(`[Bootstrap] Group watcher stop error: ${err}`));
+        console.info("[Bootstrap] Group watcher stopped.");
+      }
+
       await controller.shutdown();
       console.info("[Bootstrap] Controller shut down.");
 
@@ -197,6 +213,28 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  if (config.groups) {
+    // falha aqui nao derruba o bot: ler grupo e um extra, responder no Telegram e o essencial
+    try {
+      groupWatcher = new TelegramGroupWatcher(config.groups, memoryManager);
+      await groupWatcher.start();
+
+      // Sem await: a destilacao faz chamadas de LLM sobre centenas de mensagens e pode
+      // levar minutos. O bot ja atende enquanto ela roda; o conhecimento aparece depois.
+      void destilarGrupos({
+        memory: memoryManager,
+        // a lista crua, nao createWithFallback: o destilador precisa tratar resposta
+        // vazia como falha e trocar de modelo, o que aquele involucro nao faz
+        providers: providerFactory.getNames().map((n) => providerFactory.create(n)),
+        workspaceRoot: config.filesystem.workspaceRoot,
+      }).catch((err) => console.error(`[Bootstrap] Distiller failed: ${err}`));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[Bootstrap] Group watcher failed to start: ${msg}`);
+      groupWatcher = null;
+    }
+  }
 
   try {
     // start() so resolve quando o polling para, entao loga que esta pronto antes de aguardar

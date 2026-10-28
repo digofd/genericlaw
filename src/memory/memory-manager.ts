@@ -9,6 +9,7 @@ import {
   type Conversation,
   type Message,
 } from "./repositories.js";
+import { SqliteGroupMessageRepository, normalizar, type GroupMessage } from "./group-repository.js";
 
 export interface AgentLoopResult {
   conversationId: string;
@@ -36,6 +37,7 @@ export class MemoryManager {
   private db!: Database;
   private conversationRepo!: ConversationRepository;
   private messageRepo!: MessageRepository;
+  private groupRepo!: SqliteGroupMessageRepository;
   private insertCounter = 0;
   private dirty = false;
   private isShutdown = false;
@@ -85,6 +87,7 @@ export class MemoryManager {
 
     this.conversationRepo = new SqliteConversationRepository(this.db);
     this.messageRepo = new SqliteMessageRepository(this.db);
+    this.groupRepo = new SqliteGroupMessageRepository(this.db);
     this.isShutdown = false;
 
     this.startAutoSave();
@@ -179,9 +182,63 @@ export class MemoryManager {
     // usado por consulta nenhuma; ambos custavam uma escrita a cada insercao.
     // Nome novo de proposito: CREATE INDEX IF NOT EXISTS manteria silenciosamente a
     // definicao antiga do indice num banco ja existente.
+    // Sem FK para conversations e fora da poda por janela: e historico de grupo,
+    // nao contexto de conversa. A PK composta e o que torna o backfill idempotente.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_messages (
+        chat_id     TEXT NOT NULL,
+        msg_id      INTEGER NOT NULL,
+        chat_title  TEXT NOT NULL DEFAULT '',
+        sender      TEXT NOT NULL DEFAULT '',
+        text        TEXT NOT NULL,
+        date        TEXT NOT NULL,
+        text_norm   TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (chat_id, msg_id)
+      )
+    `);
+
+    // Ate onde o destilador ja leu cada grupo. Tabela propria em vez de coluna:
+    // a marca d'agua e por grupo, nao por mensagem.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_digest (
+        chat_id     TEXT PRIMARY KEY,
+        last_msg_id INTEGER NOT NULL,
+        updated_at  TEXT NOT NULL
+      )
+    `);
+
+    this.migrateTextNorm();
+
     this.db.run("CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id, id)");
     this.db.run("DROP INDEX IF EXISTS idx_messages_conversation");
     this.db.run("DROP INDEX IF EXISTS idx_messages_role");
+  }
+
+  /**
+   * text_norm entrou depois que a tabela ja tinha historico coletado. Em banco
+   * novo o CREATE TABLE acima ja a cria e nada acontece aqui; em banco existente
+   * a coluna e adicionada e preenchida uma unica vez, senao a busca nao acharia
+   * nada do que foi coletado antes.
+   */
+  private migrateTextNorm(): void {
+    const info = this.db.exec("PRAGMA table_info(group_messages)");
+    const colunas = info.length ? info[0].values.map((v) => String(v[1])) : [];
+    if (colunas.includes("text_norm")) return;
+
+    this.db.run("ALTER TABLE group_messages ADD COLUMN text_norm TEXT NOT NULL DEFAULT ''");
+
+    const linhas = this.db.exec("SELECT chat_id, msg_id, text FROM group_messages");
+    if (!linhas.length) return;
+
+    const stmt = this.db.prepare("UPDATE group_messages SET text_norm = ? WHERE chat_id = ? AND msg_id = ?");
+    try {
+      for (const [chatId, msgId, text] of linhas[0].values) {
+        stmt.run([normalizar(String(text)), String(chatId), Number(msgId)]);
+      }
+    } finally {
+      stmt.free();
+    }
+    console.info(`[MemoryManager] text_norm preenchido em ${linhas[0].values.length} mensagem(ns) de grupo.`);
   }
 
   private checkDbSize(): void {
@@ -216,6 +273,30 @@ export class MemoryManager {
       this.db.run("PRAGMA incremental_vacuum");
       this.insertCounter = 0;
     }
+  }
+
+  /**
+   * Repositorio do historico de grupos. Escritas por aqui precisam marcar o banco
+   * como sujo, senao o autosave de 5s as descarta — dai o wrapper em vez do repo cru.
+   */
+  get groupMessages(): SqliteGroupMessageRepository {
+    this.ensureInitialized();
+    return this.groupRepo;
+  }
+
+  /** Grava mensagens de grupo e devolve quantas eram novas. */
+  saveGroupMessages(messages: GroupMessage[]): number {
+    this.ensureInitialized();
+    const inserted = this.groupRepo.save(messages);
+    if (inserted > 0) this.dirty = true;
+    return inserted;
+  }
+
+  /** Avanca a marca d'agua do destilador. Wrapper pelo mesmo motivo de saveGroupMessages. */
+  saveDigestWatermark(chatId: string, msgId: number): void {
+    this.ensureInitialized();
+    this.groupRepo.setDigestWatermark(chatId, msgId);
+    this.dirty = true;
   }
 
   createConversation(userId: string, id?: string): Conversation {

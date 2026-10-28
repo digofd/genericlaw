@@ -148,8 +148,13 @@ export class OpenAiCompatProvider implements ILlmProvider {
   }
 }
 
-/** Provedores com chave propria. O Gemini fica de fora: protocolo diferente. */
+/**
+ * Provedores com chave propria. O Gemini fica de fora: protocolo diferente.
+ * O `model` aqui e so o padrao — <PROVEDOR>_MODEL no .env sobrescreve, porque
+ * nome de modelo envelhece mais rapido que este arquivo.
+ */
 export const DIRECT_PRESETS: Record<string, { url: string; model: string }> = {
+  openai: { url: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini" },
   deepseek: { url: "https://api.deepseek.com/v1/chat/completions", model: "deepseek-chat" },
   groq: { url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile" },
 };

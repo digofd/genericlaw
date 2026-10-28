@@ -31,6 +31,7 @@ export class ProviderFactory {
     primaryProvider: string;
     fallbackProviders: string[];
     apiKeys: Record<string, string>;
+    models?: Record<string, string>;
     openRouterApiKey?: string;
     timeoutMs?: number;
     retryCount?: number;
@@ -53,19 +54,26 @@ export class ProviderFactory {
         retryBaseDelayMs: config.retryBaseDelayMs,
       };
 
-      if (useOpenRouter) {
+      // chave nativa vence o OpenRouter para aquele provedor: e conexao direta, sem a
+      // fila compartilhada dos modelos gratuitos
+      const apiKey = config.apiKeys[name];
+
+      if (useOpenRouter && !apiKey) {
         factory.register(name, openRouterProvider({ name, apiKey: config.openRouterApiKey!, ...retries }));
         continue;
       }
 
-      const apiKey = config.apiKeys[name];
       if (!apiKey) continue;
 
+      const modelo = config.models?.[name];
       const preset = DIRECT_PRESETS[name];
       if (preset) {
-        factory.register(name, new OpenAiCompatProvider({ name, apiKey, ...preset, ...retries }));
+        factory.register(
+          name,
+          new OpenAiCompatProvider({ name, apiKey, ...preset, ...(modelo ? { model: modelo } : {}), ...retries })
+        );
       } else if (name === "gemini") {
-        factory.register(name, new GeminiProvider({ apiKey, ...retries }));
+        factory.register(name, new GeminiProvider({ apiKey, model: modelo, ...retries }));
       } else {
         console.warn(`[ProviderFactory] Unknown provider '${name}', skipping.`);
       }

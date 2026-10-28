@@ -72,3 +72,69 @@ describe("validateConfig", () => {
     expect(Object.isFrozen(c)).toBe(true);
   });
 });
+
+// Antes desta regra, OPENROUTER_API_KEY desligava a coleta de chaves nativas: uma
+// GEMINI_API_KEY no .env era ignorada em silencio e o trafego ia para o alias pago
+// do OpenRouter. O operador nao tinha como perceber.
+describe("precedencia de chave nativa sobre OpenRouter", () => {
+  const base = { TELEGRAM_BOT_TOKEN: "t", TELEGRAM_ALLOWED_USER_IDS: "1" };
+
+  it("coleta a chave nativa mesmo com OpenRouter configurado", () => {
+    const cfg = validateConfig({
+      ...base,
+      OPENROUTER_API_KEY: "sk-or-xxx",
+      LLM_PROVIDER: "gemini",
+      LLM_PROVIDERS: "deepseek",
+      GEMINI_API_KEY: "AIza-xxx",
+    });
+    expect(cfg.llm.apiKeys.gemini).toBe("AIza-xxx");
+    // deepseek fica sem chave nativa de proposito: quem cobre e o OpenRouter
+    expect(cfg.llm.apiKeys.deepseek).toBeUndefined();
+    expect(cfg.llm.openRouterApiKey).toBe("sk-or-xxx");
+  });
+
+  it("com OpenRouter, chave nativa ausente nao e erro: ele cobre o provedor", () => {
+    expect(() =>
+      validateConfig({ ...base, OPENROUTER_API_KEY: "sk-or-xxx", LLM_PROVIDER: "gemini" })
+    ).not.toThrow();
+  });
+
+  it("sem OpenRouter, chave nativa ausente continua sendo erro de boot", () => {
+    expect(() => validateConfig({ ...base, LLM_PROVIDER: "gemini" })).toThrow(/GEMINI_API_KEY/);
+  });
+
+  it("modelo cru do OpenRouter nao exige chave nativa: nao esta no mapa", () => {
+    const cfg = validateConfig({
+      ...base,
+      OPENROUTER_API_KEY: "sk-or-xxx",
+      LLM_PROVIDER: "dots-studio/dots-3-note-preview:free",
+    });
+    expect(cfg.llm.apiKeys).toEqual({});
+  });
+});
+
+describe("provedor openai e override de modelo", () => {
+  const base = { TELEGRAM_BOT_TOKEN: "t", TELEGRAM_ALLOWED_USER_IDS: "1" };
+
+  it("reconhece OPENAI_API_KEY como chave nativa", () => {
+    const cfg = validateConfig({ ...base, LLM_PROVIDER: "openai", OPENAI_API_KEY: "sk-xxx" });
+    expect(cfg.llm.apiKeys.openai).toBe("sk-xxx");
+  });
+
+  it("sem a chave e sem OpenRouter, o boot falha apontando a variavel certa", () => {
+    expect(() => validateConfig({ ...base, LLM_PROVIDER: "openai" })).toThrow(/OPENAI_API_KEY/);
+  });
+
+  // nome de modelo aposentado nao pode exigir edicao de codigo para voltar a bootar
+  it("OPENAI_MODEL sobrescreve o padrao do preset", () => {
+    const cfg = validateConfig({
+      ...base, LLM_PROVIDER: "openai", OPENAI_API_KEY: "sk-xxx", OPENAI_MODEL: "gpt-9-turbo",
+    });
+    expect(cfg.llm.models.openai).toBe("gpt-9-turbo");
+  });
+
+  it("sem override, models fica vazio e o preset decide", () => {
+    const cfg = validateConfig({ ...base, LLM_PROVIDER: "openai", OPENAI_API_KEY: "sk-xxx" });
+    expect(cfg.llm.models).toEqual({});
+  });
+});

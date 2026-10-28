@@ -10,6 +10,8 @@ declare module "sql.js" {
 
   class Statement {
     bind(params?: unknown[]): boolean;
+    /** bind + step + reset numa chamada; para INSERT/UPDATE em lote. */
+    run(params?: unknown[]): void;
     step(): boolean;
     getAsObject(params?: Record<string, unknown>): Record<string, unknown>;
     free(): boolean;
