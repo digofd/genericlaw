@@ -314,8 +314,8 @@ describe("transcricao entra no prompt como dado cercado", () => {
     await destilarGrupos({ memory: mm, providers: [provider], workspaceRoot: WS });
 
     const prompt = provider.chamadas[0];
-    expect(prompt).toContain("<<<DADOS_DE_TERCEIROS>>>");
-    expect(prompt).toContain("<<<FIM_DADOS_DE_TERCEIROS>>>");
+    expect(prompt).toMatch(/<<<DADOS_DE_TERCEIROS:[0-9a-f]{16}>>>/);
+    expect(prompt).toMatch(/<<<FIM_DADOS_DE_TERCEIROS:[0-9a-f]{16}>>>/);
     expect(prompt).toContain("nunca instrucao");
   });
 
@@ -327,6 +327,6 @@ describe("transcricao entra no prompt como dado cercado", () => {
 
     await destilarGrupos({ memory: mm, providers: [provider], workspaceRoot: WS });
 
-    expect(provider.chamadas[0].match(/<<<FIM_DADOS_DE_TERCEIROS>>>/g)).toHaveLength(1);
+    expect(provider.chamadas[0].match(/<<<FIM_DADOS_DE_TERCEIROS[^>]*>>>/g)).toHaveLength(1);
   });
 });
