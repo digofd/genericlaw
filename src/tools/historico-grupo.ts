@@ -1,4 +1,4 @@
-import { BaseTool, truncateUtf8 } from "./registry.js";
+import { BaseTool, truncateUtf8, delimitarNaoConfiavel } from "./registry.js";
 import type { ToolDefinition, ToolResult } from "./registry.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 import type { GroupMessage, GroupSummary } from "../memory/group-repository.js";
@@ -145,6 +145,8 @@ export class HistoricoGrupoTool extends BaseTool {
       return `${prefixo}[${quando}] ${m.sender}: ${m.text}`;
     });
 
-    return truncateUtf8(`${titulo}:\n${linhas.join("\n")}`, MAX_SAIDA_BYTES);
+    // trunca antes de embrulhar: cortar depois poderia decepar o marcador de fim
+    const corpo = truncateUtf8(linhas.join("\n"), MAX_SAIDA_BYTES);
+    return `${titulo}:\n${delimitarNaoConfiavel(corpo, "o texto literal de mensagens escritas por membros do grupo")}`;
   }
 }
